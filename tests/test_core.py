@@ -128,3 +128,21 @@ def test_malformed_model_actions_become_failures(tmp_path,action):
  t=task();t['budget']['attempts']=1
  run_task(t,P(),Backend(),tmp_path/'run')
  assert read(tmp_path/'run/attempts/001/result.json')['failure'].startswith('invalid_action')
+
+
+def test_native_acceptance_requires_measured_contiguous_evidence():
+ criteria={'kind':'native','hold_s':.005,'validator_id':'frozen task checker'}
+ rows=[{'time':.005,'dt':.005,'native_success':True,'stable':True}]
+ assert evaluate(rows,criteria)['success']
+ rows[0]['stable']=False
+ assert not evaluate(rows,criteria)['success']
+ with pytest.raises(ValueError):evaluate([{'time':.005,'dt':.005,'success':True}],criteria)
+
+
+def test_disagreement_with_offline_checker_cannot_export_success(tmp_path):
+ class B(Backend):
+  def verify(self,out):return {'success':False}
+ class P:
+  def plan(self,req):return {'analysis':{'evidence':['measured'],'hypothesis':'test'},'actions':[{'name':'win'}]}
+ with pytest.raises(RuntimeError,match='disagrees'):run_task(task(),P(),B(),tmp_path/'run')
+ assert not (tmp_path/'run/success').exists()

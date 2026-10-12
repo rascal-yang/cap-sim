@@ -44,7 +44,7 @@ class OpenAIPlanner:
         except Exception as exc:
             if not call.exists():write(call,{'started':start,'wall_s':time.time()-start,'status':'error','error_type':type(exc).__name__,'usage':None})
             raise
-    def plan(self,request):return self.complete(POLICY_PROMPT,request)
+    def plan(self,request):return self.complete(POLICY_PROMPT,request,request.get('observation',{}).get('images',[]))
 
 class DemoPlanner:
     """Deterministic integration fixture, explicitly NOT GPT or a generic solver."""

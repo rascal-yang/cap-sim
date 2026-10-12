@@ -10,7 +10,7 @@ from .planners import DemoPlanner,FilePlanner,CommandPlanner,OpenAIPlanner
 
 
 def make_backend(task):
-    names={'mujoco_gripper':'cap_sim.backends.demo:Backend','g1_sonic':'cap_sim.backends.g1:Backend'}
+    names={'humano':'cap_sim.backends.humano:Backend','mujoco_gripper':'cap_sim.backends.demo:Backend','g1_sonic':'cap_sim.backends.g1:Backend'}
     path=names.get(task['backend'],task['backend'])
     if ':' not in path:raise ValueError('Unknown backend; use registered name or trusted module:class')
     mod,name=path.split(':');return getattr(importlib.import_module(mod),name)()
@@ -34,7 +34,7 @@ def load_task(path):
     path=Path(path).resolve();task=read(path)
     for key in ('references','skills'):
         task[key]=[str((path.parent/Path(p)).resolve()) for p in task.get(key,[])]
-    for key in ('experiment','sonic_models','python','asset_manifest'):
+    for key in ('experiment','sonic_models','python','asset_manifest','prepared','initial_state'):
         if key in task.get('resources',{}):task['resources'][key]=str((path.parent/Path(task['resources'][key])).resolve())
     if 'python_paths' in task.get('resources',{}):task['resources']['python_paths']=[str((path.parent/Path(p)).resolve()) for p in task['resources']['python_paths']]
     return task
@@ -54,6 +54,7 @@ def main():
     build=sub.add_parser('assets-build');build.add_argument('--plan',required=True);build.add_argument('--out',required=True)
     bridge=sub.add_parser('task-from-assets');bridge.add_argument('--manifest',required=True);bridge.add_argument('--object-id',required=True);bridge.add_argument('--support-id',required=True);bridge.add_argument('--out',required=True)
     render=sub.add_parser('render-demo');render.add_argument('--attempt',required=True);render.add_argument('--out',required=True)
+    native_render=sub.add_parser('render-native');native_render.add_argument('--attempt',required=True);native_render.add_argument('--out',required=True)
     args=p.parse_args()
     if args.op=='run':
         task=load_task(args.task)
@@ -82,6 +83,9 @@ def main():
     elif args.op=='assets-build':
         from .assets import build_scene,validate_scene
         build_scene(read(args.plan),args.out);result=validate_scene(args.out)
+    elif args.op=='render-native':
+        from .render import render_native
+        result=render_native(args.attempt,args.out)
     else:
         from .render import render_demo
         result=render_demo(args.attempt,args.out)

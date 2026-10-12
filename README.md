@@ -166,3 +166,15 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 ```
 
 关闭 pytest 的外部插件自动加载仅用于隔离机器上 ROS 等无关插件。CI 同样测试真实接触示例，不调用在线 API。
+
+## 原生 HUMANO 多任务后端
+
+`backend: humano` 加载本地 HUMANO 的原资产、任务配置、初态和原生验收，SONIC 同时支持稀疏手腕目标与全身参考关键帧，实际通过力矩执行。需要在安装了 HUMANO 的环境中运行，并指定 `resources.prepared`（含 environment_config.json）、`initial_state`（episode start NPZ）、`sonic_models`。
+
+原生任务按记录的 `reward_dt` 更新验收，200 Hz 保存实测状态；保存后再次恢复实测状态复核。`scene.translation` 在 reset 前改变目标初始位置。关节限位、目标子部件、接触和状态通过观察接口提供。原生任务使用其自己的验收标准，不能将不同任务的成功等同于苹果任务的 10 cm / 1 秒。
+
+```bash
+cap-sim render-native --attempt /path/run/attempts/001 --out /path/video
+```
+
+输出头部第一视角和外部第三视角 MP4、相机轨迹及解码检查。原生回放使用 `scene.mjb`，需与执行时相同的 MuJoCo 版本；`scene_source.xml` 仅供诊断。视频是 MuJoCo EGL 渲染。十任务实验规则见 [humano-experiment-plan.md](docs/humano-experiment-plan.md)。

@@ -11,7 +11,10 @@ def validate_task(task):
     for key in ('name', 'backend', 'scene', 'acceptance', 'budget'):
         if key not in task:
             raise ValueError('Missing task field: ' + key)
-    for key in ('lift_m', 'hold_s'):
+    kind=task['acceptance'].get('kind','lift')
+    if kind not in ('lift','native'):raise ValueError('Unknown acceptance kind')
+    if kind=='native' and not task['acceptance'].get('validator_id'):raise ValueError('Native validator identity required')
+    for key in (('hold_s',) if kind=='native' else ('lift_m', 'hold_s')):
         value = task['acceptance'][key]
         if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError('Acceptance must be positive and finite')
@@ -28,22 +31,26 @@ def validate_task(task):
 
 def evaluate(samples, criteria):
     """One evidence row represents its preceding physics interval, in seconds."""
+    native=criteria.get('kind')=='native'
     elapsed = longest = peak = 0.
     previous = 0.
     for row in samples:
-        values = [row[k] for k in ('time', 'dt', 'lift_m', 'support_force', 'hand_force')]
+        keys=('time','dt') if native else ('time', 'dt', 'lift_m', 'support_force', 'hand_force')
+        if any(k not in row for k in keys):raise ValueError('Missing physical evidence')
+        values = [row[k] for k in keys]
         if not all(isinstance(x, (float, int)) and math.isfinite(x) for x in values):
             raise ValueError('Non-finite or missing physical evidence')
         if row['dt'] <= 0 or row['time'] <= previous or abs(row['time'] - previous - row['dt']) > 1e-6:
             raise ValueError('Non-contiguous physics timestamps')
-        if not isinstance(row['stable'], bool):
+        if not isinstance(row.get('stable'), bool):
             raise ValueError('stable must be a measured boolean')
         previous = row['time']
-        good = (row['lift_m'] >= criteria['lift_m'] and row['support_force'] < .1
+        if native and not isinstance(row.get('native_success'),bool):raise ValueError('Measured native_success required')
+        good = row['native_success'] and row['stable'] if native else (row['lift_m'] >= criteria['lift_m'] and row['support_force'] < .1
                 and row['hand_force'] > .05 and row['stable'])
         elapsed = elapsed + row['dt'] if good else 0.
         longest = max(longest, elapsed)
-        peak = max(peak, row['lift_m'])
+        peak = max(peak, row.get('lift_m',0.))
     return {'success': longest + 1e-9 >= criteria['hold_s'], 'max_lift_m': peak,
             'max_hold_s': longest, 'sim_seconds': previous, 'criteria': copy.deepcopy(criteria)}
 
@@ -160,7 +167,7 @@ def run_task(task, planner, backend, directory, resume=False):
                     offset = np.asarray(action.pop('wrist_offset'), dtype=float)
                     if offset.shape != (3,) or not np.isfinite(offset).all():
                         raise ValueError('wrist_offset must be finite xyz')
-                    target_key = 'position' if task['backend'] == 'mujoco_gripper' else 'wrist_position'
+                    target_key = {'mujoco_gripper':'position','humano':'right_position'}.get(task['backend'],'wrist_position')
                     if target_key in action:
                         raise ValueError('Use either absolute wrist target or offset')
                     action[target_key] = (np.asarray(observation['wrist_position']) + offset).tolist()
@@ -203,6 +210,11 @@ def run_task(task, planner, backend, directory, resume=False):
                     break
                 queue = copy.deepcopy(new_actions)
         backend.export(out)
+        if hasattr(backend,'verify'):
+            independent=backend.verify(out)
+            write(out/'independent_validation.json',independent)
+            if independent['success'] != acceptance['success']:
+                raise RuntimeError('Offline physical validation disagrees with online success')
         metrics = backend.metrics()
         if not all(math.isfinite(metrics[k]) and metrics[k] >= 0
                    for k in ('roughness', 'root_omega_rms', 'peak_table_force')):
@@ -222,7 +234,7 @@ def run_task(task, planner, backend, directory, resume=False):
             successes.append(number)
             target = directory / 'success' / f'attempt_{number:03d}'
             target.mkdir(parents=True, exist_ok=True)
-            for filename in ('samples.json', 'states.npz', 'contacts.json', 'scene.xml'):
+            for filename in ('samples.json', 'states.npz', 'contacts.json', 'scene.xml', 'scene.mjb', 'scene_source.xml', 'independent_validation.json'):
                 if (out / filename).exists():shutil.copy2(out / filename, target / filename)
             write(target / 'trajectory.json', {'schema_version': 1, 'task': task,
                   'actions': executed, 'acceptance': acceptance, 'metrics': metrics,
