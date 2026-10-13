@@ -197,3 +197,5 @@ cap-sim render-native --attempt /path/run/attempts/001 --out /path/video
 十任务实验的协议、规划脚本快照与结果见 [benchmarks/humano_ten_tasks](benchmarks/humano_ten_tasks/README.md)。原生 Pick 的高度判据可能被非手部碰撞触发，因此实验另列抓取质量审查；有效输出以 `success_catalog.json` 为准，原生 `success/` 中的记录不能直接视作有效抓取训练数据。
 
 开发接口：`cap_sim.pipeline.run_pipeline` / `augment_pipeline` 是带参考恢复门禁的生成入口；`core.run_task` 是单阶段执行原语，供适配器和历史实验使用，不负责阶段编排。历史 benchmark 快照保留原行为，不因本次修改重写结果。
+
+最新苹果恢复门禁实验：[记录与视频](benchmarks/apple_reference_recovery/REPORT.md)。恢复 0/10，扩增按门禁未执行；控制输入兼容性尚未验证通过。
