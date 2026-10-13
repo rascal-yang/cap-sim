@@ -14,3 +14,7 @@
 本机证据（不入 Git）：`runs/release_validated/report.json`、`runs/release_video/verification.json`、`runs/video_assets_checked/summary.json`、`runs/video_asset_execution/summary.json`、`runs/g1_final_smoke/`。较早 `runs/demo_smoke` 是开发期间失败原型，保留用于溯源，最终结果以上述目录为准。
 
 首版范围：可运行管线、夹爪接触示例、G1 外部适配器、视频资产代理模型、参考导入／总结。仍需任务级验证：在线 GPT 表现、更多机器人与非抬升任务、复杂网格重建、通用 Isaac 双视角导出。
+
+## 10任务实验收尾验证
+
+原生适配器版本 `d991dd5`：32 个核心测试及 4 项参考策略回归检查通过。20 个案例、40 个第一／第三视角视频完成；完整尝试的独立验收与在线判定一致，无参考冻结哈希未变，成功基线均保留。有效任务成功为无参考 4/10、有参考扩增 1/10；篮子原生高度通过但无有效手部抓取，单独排除。没有在线模型 API 调用，本轮不构成 skill 收益的因果消融。详见 [实验报告](../benchmarks/humano_ten_tasks/REPORT.zh-CN.md)。

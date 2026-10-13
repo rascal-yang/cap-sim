@@ -21,7 +21,7 @@ flowchart LR
   B --> X[改变场景，重新执行并验收扩增轨迹]
 ```
 
-目前内置验收任务是“接触抓取后抬升指定高度并保持指定时间”，包含便携 MuJoCo 双指夹爪示例和原 G1/Dex3/SONIC 适配器。新机器人可接后端；其他任务的验收逻辑需要扩展。这里不承诺任意任务、任意视频都能自动求解。
+便携 MuJoCo 双指夹爪示例和原 G1/Dex3/SONIC 适配器支持“接触抓取后抬升指定高度并保持指定时间”。原生 HUMANO 后端另支持其任务自身的验收，包括踢球、推物、坐椅、按按钮和抓取。新机器人可接后端；这里不承诺任意任务、任意视频都能自动求解。
 
 ## 快速运行
 
@@ -178,3 +178,5 @@ cap-sim render-native --attempt /path/run/attempts/001 --out /path/video
 ```
 
 输出头部第一视角和外部第三视角 MP4、相机轨迹及解码检查。原生回放使用 `scene.mjb`，需与执行时相同的 MuJoCo 版本；`scene_source.xml` 仅供诊断。视频是 MuJoCo EGL 渲染。十任务实验规则见 [humano-experiment-plan.md](docs/humano-experiment-plan.md)。
+
+十任务实验的协议、规划脚本快照与结果见 [benchmarks/humano_ten_tasks](benchmarks/humano_ten_tasks/README.md)。原生 Pick 的高度判据可能被非手部碰撞触发，因此实验另列抓取质量审查；有效输出以 `success_catalog.json` 为准，原生 `success/` 中的记录不能直接视作有效抓取训练数据。
