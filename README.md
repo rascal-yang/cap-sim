@@ -9,7 +9,11 @@ flowchart LR
   V[视频] --> A[视觉分析 / 资产清单]
   A --> S[仿真资产与校验]
   T[任务 + 场景 + 固定预算] --> P[GPT 分段规划]
-  R[可选参考轨迹] --> K[几何 / 接触经验与冻结 skill]
+  R[可选参考轨迹] --> RR[原场景 + 同一控制接口：参考恢复]
+  RR --> RV[实际执行与物理验收]
+  RV -->|失败：分析并在恢复预算内重试| RR
+  RV -->|预算耗尽：停止，不生成变体| STOP[保存恢复失败记录]
+  RV -->|成功：保存恢复基线| K[恢复成功轨迹 / 冻结经验]
   K --> P
   S --> P
   P --> C[现有控制器执行]
@@ -86,7 +90,16 @@ cap-sim summarize-reference --reference runs/reference.json \
 {"references":["reference.json"], "skills":["experience/skill.json"]}
 ```
 
-以上为应合入任务的字段，路径相对于任务 JSON 文件。然后正常运行 `cap-sim run`。只想让执行者看总结、不看原动作时，仅保留 `skills`，不传 `references`。总结与执行使用独立 API 请求，无共享对话历史。`--no-reference` 会清空两者。
+以上为应合入任务的字段，路径相对于任务 JSON 文件。有 `references` 时，必须用 `--reference-task` 指定原场景任务：
+
+```bash
+cap-sim run --task target-task.json --reference-task original-task.json \
+  --planner openai --model YOUR_MODEL --out runs/reference_generation
+```
+
+现在先执行 `reference_recovery/`，在原场景、原初态使用同一控制接口实际恢复参考。成功后保存基线，才执行 `generation/`，并把恢复成功轨迹交给生成器。导入数据中的成功标记、离线状态验收都不能跳过恢复。恢复预算耗尽返回 `reference_recovery_failed`，不启动生成。两阶段各用对应任务的显式预算、分别记录用时；恢复阶段不做优化，生成阶段仍先成功再优化。机器人后端、控制器／资产资源和成功判据必须一致；场景与初态可不同。原场景配置需由调用者明确提供，管线不会从稀疏参考猜测。
+
+`--resume` 会复核恢复证据后续跑；模型调用日志也按阶段分开。只想让执行者看总结、不看原动作时，仅保留 `skills`，不传 `references`。总结与执行使用独立 API 请求，无共享对话历史。`--no-reference` 会清空两者。
 
 原数据与旧实验导入：
 
@@ -101,6 +114,8 @@ HUMANO 导入额外需要 `pip install -e '.[data]'`。原实验未完成任务�
 
 ## 扩增成功轨迹
 
+`augment` 先在原场景取得一次通过物理验收的基线，再逐个执行变体。任务带 `references` 时也必须提供 `--reference-task original-task.json`；无外部参考时先用当前任务生成原场景基线。恢复失败不创建任何变体。总预算为一次恢复预算加每个变体的任务预算。
+
 ```bash
 cap-sim augment --task examples/lift.json --variants examples/variants.json \
   --planner demo --out runs/augmented
@@ -108,7 +123,7 @@ cap-sim augment --task examples/lift.json --variants examples/variants.json \
 
 GPT 扩增时把 `--planner demo` 替换成 `--planner openai --model YOUR_MODEL`，并在任务中指定参考或 skill。每个变体从初态重新执行、独立验收；不是修改轨迹坐标后直接标为成功。夹爪支持物体平面位置、半径、桌面高度；G1 支持 `translation`、`table_delta`、`scale`。尺寸变化保持质量和摩擦，MuJoCo 根据几何重新计算惯量，物体底面重新放到桌上。
 
-**预算按变体计算**：例如两个变体、每个最多 10 次，总计最多 20 次。优化占用同一尝试总预算，额外受 `optimization_attempts` 限制。
+**预算分阶段计算**：例如恢复最多 10 次、两个变体各最多 10 次，总计最多 30 次；恢复成功即停止恢复重试。优化占用同一尝试总预算，额外受 `optimization_attempts` 限制。
 
 ## 从视频建立资产并运行
 
@@ -180,3 +195,5 @@ cap-sim render-native --attempt /path/run/attempts/001 --out /path/video
 输出头部第一视角和外部第三视角 MP4、相机轨迹及解码检查。原生回放使用 `scene.mjb`，需与执行时相同的 MuJoCo 版本；`scene_source.xml` 仅供诊断。视频是 MuJoCo EGL 渲染。十任务实验规则见 [humano-experiment-plan.md](docs/humano-experiment-plan.md)。
 
 十任务实验的协议、规划脚本快照与结果见 [benchmarks/humano_ten_tasks](benchmarks/humano_ten_tasks/README.md)。原生 Pick 的高度判据可能被非手部碰撞触发，因此实验另列抓取质量审查；有效输出以 `success_catalog.json` 为准，原生 `success/` 中的记录不能直接视作有效抓取训练数据。
+
+开发接口：`cap_sim.pipeline.run_pipeline` / `augment_pipeline` 是带参考恢复门禁的生成入口；`core.run_task` 是单阶段执行原语，供适配器和历史实验使用，不负责阶段编排。历史 benchmark 快照保留原行为，不因本次修改重写结果。

@@ -1,10 +1,9 @@
 import argparse
-import copy
 import importlib
 import json
 import os
 from pathlib import Path
-from .core import run_task
+from .pipeline import run_pipeline, augment_pipeline
 from .io import read,write
 from .planners import DemoPlanner,FilePlanner,CommandPlanner,OpenAIPlanner
 
@@ -46,8 +45,8 @@ def planner_args(p):
 
 def main():
     p=argparse.ArgumentParser(description='Evidence-gated CaP simulation pipeline');sub=p.add_subparsers(dest='op',required=True)
-    run=sub.add_parser('run');run.add_argument('--task',required=True);run.add_argument('--out',required=True);run.add_argument('--resume',action='store_true');run.add_argument('--no-reference',action='store_true');planner_args(run)
-    aug=sub.add_parser('augment');aug.add_argument('--task',required=True);aug.add_argument('--variants',required=True);aug.add_argument('--out',required=True);planner_args(aug)
+    run=sub.add_parser('run');run.add_argument('--task',required=True);run.add_argument('--out',required=True);run.add_argument('--resume',action='store_true');run.add_argument('--no-reference',action='store_true');run.add_argument('--reference-task',help='Original scene task used for physical reference recovery');planner_args(run)
+    aug=sub.add_parser('augment');aug.add_argument('--task',required=True);aug.add_argument('--variants',required=True);aug.add_argument('--out',required=True);aug.add_argument('--reference-task',help='Original scene task used for physical reference recovery');aug.add_argument('--resume',action='store_true');planner_args(aug)
     imp=sub.add_parser('import-reference');imp.add_argument('--source',required=True);imp.add_argument('--out',required=True);imp.add_argument('--format',choices=['cap','g1-attempt','humano'],default='cap');imp.add_argument('--scene-xml')
     summary=sub.add_parser('summarize-reference');summary.add_argument('--reference',required=True);summary.add_argument('--out',required=True);summary.add_argument('--video');planner_args(summary)
     asset=sub.add_parser('assets-from-video');asset.add_argument('--video',required=True);asset.add_argument('--out',required=True);asset.add_argument('--scene-plan');asset.add_argument('--mesh-command');planner_args(asset)
@@ -59,15 +58,10 @@ def main():
     if args.op=='run':
         task=load_task(args.task)
         if args.no_reference:task['references']=[];task['skills']=[]
-        result=run_task(task,make_planner(args,args.out),make_backend(task),args.out,resume=args.resume)
+        result=run_pipeline(task,lambda out:make_planner(args,out),make_backend,args.out,reference_task=load_task(args.reference_task) if args.reference_task else None,resume=args.resume)
     elif args.op=='augment':
-        task=load_task(args.task);out=Path(args.out);out.mkdir(parents=True,exist_ok=False);results=[]
-        variants=read(args.variants)
-        if not isinstance(variants,list) or not 1<=len(variants)<=100:raise ValueError('Require 1..100 explicit variants')
-        for i,v in enumerate(variants):
-            candidate=copy.deepcopy(task);candidate['scene'].update(v);candidate['generation_kind']='augmented';candidate['name']=task['name']+f'_variant_{i:03d}'
-            target=out/f'variant_{i:03d}';results.append(run_task(candidate,make_planner(args,target),make_backend(candidate),target))
-        result={'variants':results,'success_count':sum(x['success'] for x in results),'budget_scope':'Each variant has the explicit task budget; total <= variants * attempts'};write(out/'summary.json',result)
+        task=load_task(args.task)
+        result=augment_pipeline(task,read(args.variants),lambda out:make_planner(args,out),make_backend,args.out,reference_task=load_task(args.reference_task) if args.reference_task else None,resume=args.resume)
     elif args.op=='import-reference':
         from .trajectories import import_reference
         result=import_reference(args.source,args.out,args.format,args.scene_xml)
