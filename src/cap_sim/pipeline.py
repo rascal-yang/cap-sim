@@ -12,7 +12,7 @@ def _recovery_task(task, reference_task):
     validate_task(reference_task)
     # Scene and initial state may differ; controller, assets, permissions and
     # acceptance must not. Unknown task fields are compared conservatively.
-    variable = {'name', 'scene', 'budget', 'references', 'skills', 'generation_kind', 'resources'}
+    variable = {'name', 'scene', 'budget', 'references', 'skills', 'generation_kind', 'resources', 'contact_prior'}
     for key in set(task) | set(reference_task):
         if key not in variable and task.get(key) != reference_task.get(key):
             raise ValueError('Recovery and generation must use the same ' + key)

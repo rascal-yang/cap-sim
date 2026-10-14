@@ -176,8 +176,12 @@ class Backend:
             def at(ts):
                 ts=np.clip(ts,body[0,0],body[-1,0]);v=np.stack([np.interp(ts,body[:,0],body[:,j]) for j in range(1,37)],axis=-1);v[:,3:7]=quat(sb(ts));return v
         root_start=self.d.qpos[:3].copy()
+        if self.task.get('policy_checks',{}).get('sonic_mode')==1 and body is not None:
+            raise ValueError('mode1 policy rejects fullbody reference')
         if a.get('facing_yaw') is not None and not np.isfinite(a['facing_yaw']):raise ValueError('Invalid facing yaw')
         rows=[];failure=None;n=round(duration/.005);steps=min(n,int((remaining+1e-9)/.005));bad=0.;lost=0.
+        record_start=len(self.sonic.records);contact_stats={};peak_table=peak_hand=0.;opposed=opposed_max=0.
+        target_body=self.m.body(self.object_ids['target']).name if 'target' in self.object_ids else None
         for i in range(steps):
             u=(i+1)/n;alpha=u*u*(3-2*u);wrists=[(p0[j]+(p1[j]-p0[j])*alpha,quat(sl[j](alpha))) for j in range(2)]
             if stage in ('walk','recover'):
@@ -194,6 +198,19 @@ class Backend:
                 info=self.e._get_info();self.native_reward=float(self.e.task.compute_reward(info,mujoco_env=self.e.mujoco));self.native_passed=bool(self.e.task.check_success(info,mujoco_env=self.e.mujoco))
             reward=self.native_reward;passed=self.native_passed
             c=self.contacts();self.hand_contact_s=self.hand_contact_s+.005 if c['hand_object_N']>.1 else 0.;lost=0 if c['hand_object_N']>.1 else lost+.005
+            peak_table=max(peak_table,c['robot_table_N']);peak_hand=max(peak_hand,c['hand_object_N'])
+            link_forces={}
+            for event in c['events']:
+                if target_body and target_body in event['bodies']:
+                    for name in event['bodies']:
+                        if 'hand' in name:link_forces[name]=link_forces.get(name,0.)+event['force_N']
+            for name in set(contact_stats)|set(link_forces):
+                item=contact_stats.setdefault(name,{'peak_force_N':0.,'continuous_s':0.,'longest_s':0.})
+                force=link_forces.get(name,0.);item['peak_force_N']=max(item['peak_force_N'],force)
+                item['continuous_s']=item['continuous_s']+.005 if force>.1 else 0.
+                item['longest_s']=max(item['longest_s'],item['continuous_s'])
+            both=all(link_forces.get(name,0.)>.1 for name in ('right_hand_thumb_2_link','right_hand_index_1_link'))
+            opposed=opposed+.005 if both else 0.;opposed_max=max(opposed_max,opposed)
             tilt=np.arccos(np.clip(rot(self.d.qpos[3:7]).as_matrix()[2,2],-1,1));stable=bool(np.isfinite(self.d.qpos).all() and self.d.qpos[2]>.30 and tilt<np.deg2rad(50))
             row={'time':float(self.d.time),'dt':.005,'native_success':passed,'stable':stable,'native_reward':reward}
             rows.append(row);self.samples.append(row);self.states.append(np.r_[self.d.time,self.d.qpos,self.d.qvel,self.d.ctrl]);self.contact_records.append(c)
@@ -205,7 +222,14 @@ class Backend:
             if stage=='lift' and lost>=.03:failure='contact_lost';break
         completed=len(rows)==n
         if not completed and not failure and not self.success:failure='execution_deadline'
-        return {'completed':completed,'reusable':completed and not failure,'failure':failure,'samples':rows,'observation':self.observe()}
+        records=self.sonic.records[record_start:]
+        controller={'actual_modes':sorted({r['mode'] for r in records}),
+                    'control_steps':len(records),'last_planner_reference_root_height_m':records[-1]['planner_reference_root_height_m'] if records else None,
+                    'final_joint_target_error_rad':(self.target-self.d.qpos[self.qids]).tolist(),
+                    'peak_robot_table_N':peak_table,'peak_hand_object_N':peak_hand,
+                    'per_link_target_contacts':contact_stats,'longest_thumb_index_contact_s':opposed_max,
+                    'contact_scope':'Target-root-body contacts; stage-local durations, not force closure.'}
+        return {'completed':completed,'reusable':completed and not failure,'failure':failure,'samples':rows,'observation':self.observe(),'controller_diagnostics':controller}
 
     def export(self,out):
         np.savez_compressed(Path(out)/'states.npz',samples=np.asarray(self.states));write(Path(out)/'contacts.json',self.contact_records);write(Path(out)/'controller.json',self.sonic.records)

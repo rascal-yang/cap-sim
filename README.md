@@ -27,7 +27,18 @@ flowchart LR
 
 便携 MuJoCo 双指夹爪示例和原 G1/Dex3/SONIC 适配器支持“接触抓取后抬升指定高度并保持指定时间”。原生 HUMANO 后端另支持其任务自身的验收，包括踢球、推物、坐椅、按按钮和抓取。新机器人可接后端；这里不承诺任意任务、任意视频都能自动求解。
 
+## 两条研究路线
+
+- [trajectory_retargeting](trajectory_retargeting/README.md)：原成功轨迹作骨架、调整动作的历史源码快照，含原位置和哈希；依赖原实验数据，尚未改造成独立入口。
+- [skill_generation](skill_generation/README.md)：纯 skill 驱动生成的独立准备目录，包含经验草稿、输入边界与实验模板；尚未执行验证。
+
+两条路线均保存在本仓库；原始实验、轨迹和视频保留在外部实验目录。
+
 ## 快速运行
+
+每次新实验先填写并冻结[统一实验记录](docs/experiment-records.md)：目的、对照基线、逐阶段物理/控制接口、运行环境、pipeline与skill哈希、预算及误差定义。使用[JSON模板](docs/experiment-record.template.json)，记录实际执行模式；禁止未声明的IK/teleop接口切换。
+
+后续HUMANO实验固定为TensorRT10.13.0.35＋ONNX Runtime1.23.2＋SONIC1.0 CPU，使用`./scripts/humano_python.sh`启动并校验版本与模型哈希。TensorRT作为环境依赖存在，SONIC三组模型仍明确走CPUExecutionProvider；本地包装包版本和模型版本分别记录。详见[运行环境](docs/runtime.md)。历史实验环境记录不回写。
 
 Python 3.10+；仿真推荐独立环境。渲染及视频抽帧需要系统 `ffmpeg` / `ffprobe`，无头渲染需要可用 EGL。
 
@@ -199,3 +210,11 @@ cap-sim render-native --attempt /path/run/attempts/001 --out /path/video
 开发接口：`cap_sim.pipeline.run_pipeline` / `augment_pipeline` 是带参考恢复门禁的生成入口；`core.run_task` 是单阶段执行原语，供适配器和历史实验使用，不负责阶段编排。历史 benchmark 快照保留原行为，不因本次修改重写结果。
 
 最新苹果恢复门禁实验：[记录与视频](benchmarks/apple_reference_recovery/REPORT.md)。恢复 0/10，扩增按门禁未执行；控制输入兼容性尚未验证通过。
+
+## Reference contact experience
+
+Optional measured object-local contact extraction and privileged planner inputs are documented in [contact-priors.md](docs/contact-priors.md). Enable `task.contact_prior` only with a physically validated native reference and matching state/contact artifacts.
+
+## Versioned task skills
+
+[Task skills](docs/task-skills.md) let GPT choose approach, stance and grasp from scoped experience. Use `--evolving-skill` to select the latest published revision before each attempt while freezing it through stage feedback; publishing a new revision does not change the retry budget or physical pipeline. The initial [apple CaP skill](task_skills/g1_dex3_apple_pick/v0001/skill.md) labels new strategies as unvalidated candidates.

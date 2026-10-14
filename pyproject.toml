@@ -11,7 +11,7 @@ dependencies = ["numpy>=1.24"]
 sim = ["mujoco>=3.1,<4"]
 test = ["pytest>=7"]
 data = ["pandas>=2", "pyarrow>=12", "scipy>=1.10"]
-g1 = ["mujoco>=3.1,<4", "scipy>=1.10", "onnxruntime>=1.17"]
+g1 = ["mujoco>=3.1,<4", "scipy>=1.10", "onnxruntime==1.23.2"]
 [project.scripts]
 cap-sim = "cap_sim.cli:main"
 [tool.setuptools.packages.find]

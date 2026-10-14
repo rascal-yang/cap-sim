@@ -16,6 +16,22 @@
 
 ## Backend
 
+### 可选的严格反思与控制模式检查
+
+新任务可设置 `policy_checks={"require_reflection":true,"sonic_mode":1}`。
+第一项要求规划器提供 `reflect(request)`：每次失败（包括预算内最后一次）保存结果后，读取实测诊断，生成并验证 `reflection.json`。
+下一次请求明确携带 `previous_reflection` 和程序计算的 `previous_reflection_sha256`；决策必须原样引用到 `analysis.reflection_sha256` 并说明 `analysis.change`，然后才允许执行本次 reset。
+恢复运行时缺失或不一致的反思会停止，不能静默重试。
+
+反思字段：`source_attempt`、`result_sha256`、`failed_stage`、`observed_facts:[{path,value}]`、`hypothesis`、`alternative_causes:[]`、`next_change:{description,controls:[]}`、`expected_effect`、`reject_if`、`hypothesis_outcome`（supported/not_supported/inconclusive）。
+事实路径从 `result` 或 `diagnostics` 开始，按点分隔，可索引数组；值必须与保存记录一致，缺失值不能作为零观测。此检查证明来源一致，不证明因果判断正确。
+`reflect` 是非物理分析调用，用时保存在 `reflection_timing.json`，不扩展物理尝试或阶段反馈预算。
+`OpenAIPlanner` 和 `CommandPlanner` 支持该入口；自定义/文件规划器需实现它，未配置严格检查的旧任务仍按原契约执行。
+
+`sonic_mode=1` 拒绝动作和复用前缀中的 `body_keyframes`/`native_prefix`，同时核对后端报告的实际模式。
+阶段诊断区分目标、实际根部/腕姿、位移和位置/朝向误差；HUMANO 额外提供原始控制模式、关节目标与实测差、阶段内接触峰值及持续时间。时长仅为阶段内统计；两指触碰不是力闭合证明。
+`observation.fingers` 是手指指令；实际手指姿态从 `joint_interface.*_hand[].qpos` 获取。
+
 可配置 `backend="your_package.module:Backend"`，仅加载用户配置的可信代码。
 
 - `interface`：支持的控制通道和物理门限，供规划器读取。

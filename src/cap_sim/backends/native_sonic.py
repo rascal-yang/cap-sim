@@ -65,5 +65,9 @@ class Sonic:
         raw=self.decoder.run(None,{self.decoder.get_inputs()[0].name:obs[None]})[0][0];self.last=raw.copy();self.tick+=1
         target=self.default+self.scale*raw[self.reverse]
         if not np.isfinite(target).all():raise RuntimeError('Nonfinite SONIC target')
-        self.records.append({'time':float(d.time),'token':token.tolist(),'encoder':e.tolist(),'target':target.tolist()})
+        self.records.append({'time':float(d.time),'mode':int(e[0]),
+                             'planner_reference_root_height_m':float(ref[0,2]),
+                             'requested_pelvis_height_m':float(height) if body_future is None else None,
+                             'measured_root_height_m':float(d.qpos[2]),
+                             'token':token.tolist(),'encoder':e.tolist(),'target':target.tolist()})
         return target

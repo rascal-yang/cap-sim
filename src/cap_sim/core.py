@@ -5,6 +5,8 @@ import shutil
 import time
 from pathlib import Path
 from .io import digest, read, write
+from .contact_prior import extract_prior, enrich_request
+from .diagnostics import stage_diagnosis, validate_reflection, check_mode
 
 
 def validate_task(task):
@@ -27,6 +29,13 @@ def validate_task(task):
         raise ValueError('Invalid execution deadline')
     if not isinstance(b.get('optimization_attempts', 0), int) or b.get('optimization_attempts', 0) < 0:
         raise ValueError('Invalid optimization budget')
+    checks=task.get('policy_checks',{})
+    if not isinstance(checks,dict) or set(checks)-{'require_reflection','sonic_mode'}:
+        raise ValueError('Invalid policy_checks')
+    if 'require_reflection' in checks and not isinstance(checks['require_reflection'],bool):
+        raise ValueError('require_reflection must be boolean')
+    if 'sonic_mode' in checks and checks['sonic_mode'] != 1:
+        raise ValueError('Only explicit mode1 enforcement is supported')
 
 
 def evaluate(samples, criteria):
@@ -64,6 +73,8 @@ def better(metrics, baseline):
 def run_task(task, planner, backend, directory, resume=False):
     validate_task(task)
     task = copy.deepcopy(task)
+    checks=task.get('policy_checks',{})
+    strict_reflection=checks.get('require_reflection',False)
     directory = Path(directory)
     fingerprint = digest(task)
     if directory.exists():
@@ -81,6 +92,10 @@ def run_task(task, planner, backend, directory, resume=False):
         if not (p / 'result.json').exists():
             raise RuntimeError('Interrupted attempt requires inspection; refusing a silent rerun: ' + str(p))
         result = read(p / 'result.json')
+        if strict_reflection and not result['acceptance']['success']:
+            if not (p/'reflection.json').exists():
+                raise ValueError('Required reflection missing on resume; inspect before retry')
+            validate_reflection(read(p/'reflection.json'),result,read(p/'diagnostics.json'),backend.interface)
         history.append(result)
         if (p / 'prefix.json').exists():
             prefixes.append(read(p / 'prefix.json'))
@@ -102,21 +117,36 @@ def run_task(task, planner, backend, directory, resume=False):
     references = [read(p) for p in task.get('references', [])]
     skills = [read(p) for p in task.get('skills', [])]
     inputs = {'references': references, 'skills': skills}
+    contact_priors = []
+    if task.get('contact_prior') and task.get('generation_kind') != 'reference_recovery':
+        if not task.get('references'):
+            raise ValueError('Contact prior requires a physically validated reference')
+        contact_priors = [extract_prior(p, **task['contact_prior']) for p in task['references']]
+        inputs['contact_priors'] = contact_priors
     frozen_inputs = directory / 'experience.json'
     if frozen_inputs.exists() and read(frozen_inputs) != inputs:
         raise RuntimeError('Reference or frozen skill changed during this run')
     write(frozen_inputs, inputs)
+    if contact_priors:write(directory/'contact_priors.json', contact_priors)
     started = time.time()
     for number in range(len(history) + 1, task['budget']['attempts'] + 1):
         phase = 'optimize' if best else 'solve'
         if best and optimized >= task['budget'].get('optimization_attempts', 0):
             break
+        previous_reflection=None
+        if strict_reflection and history and not history[-1]['acceptance']['success']:
+            prior=directory/'attempts'/f"{history[-1]['attempt']:03d}"
+            previous_reflection=validate_reflection(read(prior/'reflection.json'),history[-1],read(prior/'diagnostics.json'),backend.interface)
         request = {'task': copy.deepcopy(task), 'interface': backend.interface,
                    'attempt': number, 'phase': phase, 'references': copy.deepcopy(references), 'skills': copy.deepcopy(skills),
                    'history': copy.deepcopy(history), 'prefixes': copy.deepcopy(prefixes),
                    'successful_baseline': copy.deepcopy(best),
                    'successful_trajectory': read(directory / 'success' / f"attempt_{best['attempt']:03d}" / 'trajectory.json') if best else None,
                    'observation': backend.describe(copy.deepcopy(task)) if hasattr(backend, 'describe') else {}}
+        if previous_reflection is not None:
+            request['previous_reflection']=copy.deepcopy(previous_reflection)
+            request['previous_reflection_sha256']=digest(previous_reflection)
+        enrich_request(request, contact_priors)
         out = directory / 'attempts' / f'{number:03d}'
         out.mkdir(parents=True)
         write(out / 'request.json', request)
@@ -126,6 +156,9 @@ def run_task(task, planner, backend, directory, resume=False):
         analysis = decision.get('analysis', {})
         if not analysis.get('evidence') or not analysis.get('hypothesis'):
             raise ValueError('Record evidence and diagnosis BEFORE retry/reset')
+        if previous_reflection is not None:
+            if analysis.get('reflection_sha256') != digest(previous_reflection) or not analysis.get('change'):
+                raise ValueError('Retry must acknowledge exact previous reflection and specify change')
         actions = decision.get('actions')
         if not isinstance(actions, list) or not actions or len(actions) > 200:
             raise ValueError('A bounded action program is required')
@@ -137,6 +170,7 @@ def run_task(task, planner, backend, directory, resume=False):
                 raise ValueError('Prefix must belong to this exact task and scene')
             prefix_actions = copy.deepcopy(selected['actions'])
         actions = prefix_actions + actions
+        check_mode(actions,checks)
         if len(actions) > 200:
             raise ValueError('Prefix plus program exceeds action budget')
         decision['recorded_unix_s'] = time.time()
@@ -145,7 +179,7 @@ def run_task(task, planner, backend, directory, resume=False):
         reset_time = time.time()
         observation = backend.reset(copy.deepcopy(task), out)
         write(out / 'reset.json', {'time': reset_time, 'observation': observation})
-        samples, executed, valid_prefix = [], [], []
+        samples, executed, valid_prefix, diagnoses = [], [], [], []
         failure = None
         acceptance = evaluate([], task['acceptance'])
         queue = copy.deepcopy(actions)
@@ -160,6 +194,7 @@ def run_task(task, planner, backend, directory, resume=False):
             if remaining <= 1e-9:
                 failure = 'execution_deadline'
                 break
+            before=copy.deepcopy(observation)
             try:
                 if not isinstance(action, dict):raise ValueError('Action must be an object')
                 if 'wrist_offset' in action:
@@ -176,6 +211,13 @@ def run_task(task, planner, backend, directory, resume=False):
                 result = {'completed': False, 'reusable': False,
                           'failure': 'invalid_action: ' + str(exc),
                           'samples': [], 'observation': observation}
+            diagnosis=stage_diagnosis(action if isinstance(action,dict) else {},before,result)
+            diagnoses.append(diagnosis)
+            write(out/f'diagnosis_{len(diagnoses):03d}.json',diagnosis)
+            modes=(result.get('controller_diagnostics') or {}).get('actual_modes',[])
+            if checks.get('sonic_mode')==1 and modes and modes!=[1]:
+                backend.export(out)
+                raise RuntimeError('Measured controller mode violates mode1 policy')
             samples.extend(result['samples'])
             executed.append(action)
             write(out / f'stage_{len(executed):03d}.json', {k: v for k, v in result.items() if k != 'samples'})
@@ -198,6 +240,8 @@ def run_task(task, planner, backend, directory, resume=False):
                                     'executed_actions': copy.deepcopy(executed),
                                     'remaining_actions': copy.deepcopy(queue),
                                     'remaining_sim_seconds': task['budget']['sim_seconds'] - acceptance['sim_seconds']}
+                feedback_request['diagnostics']={'last_stage':copy.deepcopy(diagnosis),'stages':copy.deepcopy(diagnoses)}
+                enrich_request(feedback_request, contact_priors)
                 write(out / f'feedback_{feedback_index:03d}_request.json', feedback_request)
                 update = planner.plan(feedback_request)
                 write(out / f'feedback_{feedback_index:03d}_decision.json', update)
@@ -209,6 +253,7 @@ def run_task(task, planner, backend, directory, resume=False):
                     failure = 'invalid_feedback_program'
                     break
                 queue = copy.deepcopy(new_actions)
+                check_mode(queue,checks)
         backend.export(out)
         if hasattr(backend,'verify'):
             independent=backend.verify(out)
@@ -244,6 +289,21 @@ def run_task(task, planner, backend, directory, resume=False):
             if chosen:
                 best = result
         write(out / 'result.json', result)  # Commit marker, after all evidence and success artifacts.
+        diagnostic_packet={'attempt':number,'last_stage':diagnoses[-1] if diagnoses else None,'stages':diagnoses}
+        write(out/'diagnostics.json',diagnostic_packet)
+        if strict_reflection and not acceptance['success']:
+            reflect_request={'request_kind':'reflection','attempt':number,'task':copy.deepcopy(task),
+                             'interface':backend.interface,'result':copy.deepcopy(result),'result_sha256':digest(result),
+                             'diagnostics':diagnostic_packet,'prior_reflection':previous_reflection,
+                             'evidence_directory':str(out.resolve()),'actions':copy.deepcopy(executed)}
+            write(out/'reflection_request.json',reflect_request)
+            if not hasattr(planner,'reflect'):raise ValueError('Required reflection planner unavailable')
+            reflect_started=time.time()
+            reflected=planner.reflect(reflect_request)
+            write(out/'reflection_candidate.json',reflected)
+            validate_reflection(reflected,result,diagnostic_packet,backend.interface)
+            write(out/'reflection.json',reflected)
+            write(out/'reflection_timing.json',{'wall_s':time.time()-reflect_started})
         optimized += phase == 'optimize'
         history.append(result)
         write(directory / 'progress.json', {'attempts': len(history), 'successes': successes,
