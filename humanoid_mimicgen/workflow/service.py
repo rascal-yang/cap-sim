@@ -194,6 +194,10 @@ def prepare(strategy_id,request):
             'baseline_paths':[str(Path(files['record']).parent)],'planned_changes':['Independent workflow; named phases; checked preset stance if supplied; compensation mode '+policy['compensation']['mode'],'No pregrasp wrist-error gate; base stability only','Bounded physical recovery from measured state, without simulator resets'],
             'invariants':['No changes to other pipelines','No original-token prefix or implicit fallback','No physical state writes after reset'],
             'known_confounders':['Not a matched controller comparison; new strategy/stance/approach timing','Single-condition execution does not establish generality']}
+        if 'study_case' in files:
+            study=json.loads(Path(files['study_case']).read_text())
+            if set(study['purpose'])!=set(template['purpose']):raise WorkflowError('invalid_input','Study purpose fields')
+            template['purpose']=copy.deepcopy(study['purpose'])
         template['workflow']={'schema_version':1,'strategy_id':strategy_id,'strategy':s,'selection':selected,'alignment':alignment}
         template['inputs']={k:template['inputs'][k] for k in ('model','initial','targets','reference_states','task')}
         template['runtime']['actual_loaded_session_evidence']=str(root/'runtime.json')
