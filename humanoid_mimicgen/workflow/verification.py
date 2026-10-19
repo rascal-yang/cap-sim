@@ -1,0 +1,47 @@
+"""Independent measured-trace checks; successful process exit is not task success."""
+import json
+from pathlib import Path
+import numpy as np
+from .contracts import WorkflowError, canonical, now
+from .service import check_contract, write_new
+
+
+def verify(experiment):
+    root=Path(experiment);c=check_contract(root/'experiment.json');out=root/'execution';s=c['workflow']['strategy'];policy=s['policy']
+    a=json.loads((out/'execution_audit.json').read_text());obs=json.loads((out/'observations.json').read_text());commands=json.loads((out/'commands.json').read_text())
+    states=np.load(out/'states.npz')['samples'];targets=np.load(c['inputs']['targets']);dt=c['workflow']['alignment']['command_dt_s']
+    if len(states)!=len(obs) or len(obs)!=len(commands) or len(obs)!=a['physics_steps']:raise WorkflowError('verification_failed','Missing measured states')
+    if any(x['mode']!=1 for x in commands) or a['original_token_prefix_count'] or a['mode0_calls'] or a['midrun_state_resets'] or a['fallback']:
+        raise WorkflowError('verification_failed','Actual control interface mismatch')
+    contact=[x for x in commands if x['source_index']>=0];indices=[x['source_index'] for x in contact]
+    expected=list(range(s['phases'][0]['start'],s['phases'][0]['start']+len(contact)))
+    if indices!=expected or any(not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in contact):
+        raise WorkflowError('verification_failed','Source command gap, duplication or substitution')
+    if a['completed'] and (not indices or indices[-1]!=s['phases'][-1]['end']-1):raise WorkflowError('verification_failed','Truncated completion')
+    held_names={p['id'] for p in s['phases'] if p['requires_clearance']};held=[o for o in obs if o['stage'] in held_names]
+    valid=[o for o in held if o['clearance_m']>=policy['acceptance']['clearance_m'] and o['contacts']['hand_object_N']>policy['gates']['contact_force_N'] and o['contacts']['support_N']<policy['acceptance']['support_force_N']]
+    drift=max((float(np.linalg.norm(np.array(o['root_pose'][:2])-held[0]['root_pose'][:2])) for o in held),default=None)
+    physical=bool(a['completed'] and len(valid)==len(held) and len(valid)*dt>=policy['acceptance']['hold_duration_s'] and drift is not None and drift<=policy['acceptance']['root_drift_m'])
+    from cap_sim.backends.humano import Backend
+    from ..privileged import no_physics
+    b=Backend()
+    try:
+        with no_physics():b.describe(json.loads(Path(c['inputs']['task']).read_text()));native=b.verify(out)
+    finally:b.close()
+    result={'schema_version':1,'experiment_id':root.name,'strategy_id':c['workflow']['strategy_id'],'status':'completed' if physical else 'failed',
+        'stage':a['stage'],'reason_code':a['failure'] or (None if physical else 'verification_failed'),'physical_task_completed':physical,
+        'native':native,'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'],
+        'hold_valid_s':len(valid)*dt,'hold_total_s':len(held)*dt,'hold_min_clearance_m':min((x['clearance_m'] for x in held),default=None),
+        'max_clearance_m':max((x['clearance_m'] for x in obs),default=None),'hold_root_drift_m':drift,
+        'max_obstacle_force_N':max((x['contacts']['robot_obstacle_N'] for x in obs),default=None),
+        'actual_modes':a['actual_encoder_modes'],'training_ready':False,'verified_at':now(),'physics_steps_in_verifier':0,
+        'evidence':{'audit':'execution/execution_audit.json','commands':'execution/commands.json','observations':'execution/observations.json','video':None}}
+    write_new(root/'result.json',result);write_new(out/'validation.json',result)
+    reflection={'experiment_id':root.name,'strategy_id':c['workflow']['strategy_id'],'recorded_at':now(),'status':'observed',
+                'result':result,'next_action':'Review measured tracking/contact evidence before creating a new strategy revision; no automatic parameter changes'}
+    write_new(root/'reflection.json',reflection)
+    with (root.parent/'workflow_attempts.jsonl').open('ab') as f:f.write(canonical(reflection)+b'\n')
+    request=json.loads((root/'request.json').read_text());index=Path(request['strategy_root'])/'executions'/c['workflow']['strategy_id']
+    write_new(index/(root.name+'.json'),{'experiment_id':root.name,'result_sha256':__import__('hashlib').sha256(canonical(result)).hexdigest(),'result':result})
+    (root/'REPORT.md').write_text(f"# {root.name}\n\n开始 {a['started_at']}；结束 {a['ended_at']}。\n\n独立 workflow 实际控制执行；源动作可访问，属于轨迹重定向。\n\n结果：{json.dumps(result,ensure_ascii=False,indent=2)}\n\n仿真循环 {a['simulation_wall_s']:.3f}s，其中在线规划 {a['online_planning_wall_s']:.3f}s；模拟 {a['sim_seconds']:.3f}s。渲染与未测耗时 unknown。所有控制、物理、技能/代码摘要和阶段条件见冻结 experiment.json。\n")
+    return result
