@@ -87,3 +87,15 @@ User explicitly requested “开始实现”; execute inline without another per
 - First attempt reached lift but lost contact; final attempt exercised the new measured-entry wait/stop path. Neither establishes successful generic grasp after removing empirical compensation. The imported example's 0.03-rad angular criterion comes from the declared migration fixture; it is not a calibrated task capture tolerance. A future physically evidenced capture region/calibration is needed before asserting production training yield.
 - Both attempts preserve dual-view MP4s, full decode and sampled visual evidence, Chinese standalone videos, measured reports and reflection. Native-rate temporal visual review remains incomplete: training_ready=false. These are implementation regression artifacts, not the formal ten-condition comparison.
 - No new physical retry was launched after final failure. Failure reflection is stored before any later strategy revision. All code/config/inputs/models are retained by immutable strategies and frozen experiment source snapshots; hardware bitwise reproducibility is not promised.
+
+
+### User-authorized correction: feedback, direct grasp and physical recovery
+
+The user explicitly requested retaining effective closed-loop correction, removing pregrasp restrictions, approaching a preset stance, grasping once stable, and allowing backtracking/adjustment after failure. This supersedes the previous wrist-error entry gate and blanket refusal to use evidenced integral feedback. This is a bounded correction to the existing workflow; no additional approval is needed.
+
+- Added bounded_integral with explicit gain/cap and bound historical evidence, no hardcoded universal defaults. Restore successful preset stance through a fresh geometry check. Keep measured base/feet stability but remove wrist-error veto.
+- Supported-object contact failures may trigger opening, collision-checked physical retreat, measured-object retargeting, settling and retry. No qpos reset, no blind reverse playback of contact, no implicit change to gains/physics. Each failure saves reflection/checkpoint before retry. Retry count and total time are frozen.
+- Review before physics found torso mistakenly passed as an IK hand and insufficient retry-index verification. Both fixed with regressions. 20261019_2047_workflow_native was prepared but launch cancelled; no physics. Replanned and refroze the corrected source before launch.
+- New tests cover feedback saturation/reversal, recovery eligibility, correct retreat IK targets and retry audit rejection. Current new suite30 passed.
+
+- Final frozen run20261019_2050_workflow_native succeeded on first grasp:1080 source commands,1.23s hold, native success; exact2584-row measured-state match to historical successful baseline. Recovery_count0, so no claim of physical recovery validation. Tests30+135+71 passed;230 historical file hashes unchanged. Saved reflection, comparison, full decoded dual-view video and Chinese standalone MP4.

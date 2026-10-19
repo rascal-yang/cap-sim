@@ -6,6 +6,21 @@ from .contracts import WorkflowError, canonical, now
 from .service import check_contract, write_new
 
 
+def checked_retry_groups(commands,count,budget):
+    errors=[]
+    if type(count) is not int or not 0<=count<=budget:
+        errors.append('retry_budget_mismatch');count=0
+    groups=[[] for _ in range(count+1)];previous=0
+    for command in commands:
+        retry=command.get('retry_index',0)
+        if type(retry) is not int or not 0<=retry<=count:
+            errors.append('unknown_retry_index');continue
+        if retry<previous or retry>previous+1:errors.append('retry_order_mismatch')
+        previous=retry
+        if command['source_index']>=0:groups[retry].append(command)
+    return groups,sorted(set(errors))
+
+
 def verify(experiment):
     root=Path(experiment)
     if (root/'result.json').exists():return json.loads((root/'result.json').read_text())
@@ -17,10 +32,14 @@ def verify(experiment):
     if not np.isfinite(states).all():errors.append('nonfinite_state')
     if any(x['mode']!=1 for x in commands) or a['original_token_prefix_count'] or a['mode0_calls'] or a['midrun_state_resets'] or a['fallback']:
         errors.append('actual_control_interface_mismatch')
-    contact=[x for x in commands if x['source_index']>=0];indices=[x['source_index'] for x in contact]
-    expected=list(range(s['phases'][0]['start'],s['phases'][0]['start']+len(contact)))
-    if indices!=expected or any(not 0<=x['source_index']<len(targets['fingers']) or not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in contact):
-        errors.append('source_command_mismatch')
+    contact=[x for x in commands if x['source_index']>=0]
+    retry_count=a.get('recovery_count',0)
+    groups,retry_errors=checked_retry_groups(commands,retry_count,policy.get('recovery',{}).get('max_retries',0));errors.extend(retry_errors)
+    for group in groups:
+        indices=[x['source_index'] for x in group]
+        expected=list(range(s['phases'][0]['start'],s['phases'][0]['start']+len(group)))
+        if indices!=expected or any(not 0<=x['source_index']<len(targets['fingers']) or not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in group):errors.append('source_command_mismatch')
+    indices=[x['source_index'] for x in groups[-1]]
     if a['completed'] and (not indices or indices[-1]!=s['phases'][-1]['end']-1):errors.append('truncated_completion')
     # A null measurement is unknown, never evidence of successful contact.
     from .execution import finite_record
@@ -31,7 +50,7 @@ def verify(experiment):
         return True
     usable=[o for o in obs if known({k:o[k] for k in ('clearance_m','contacts','root_pose')})]
     if len(usable)!=len(obs):errors.append('unknown_measurements')
-    held_names={p['id'] for p in s['phases'] if p['requires_clearance']};held=[o for o in usable if o['stage'] in held_names]
+    held_names={p['id'] for p in s['phases'] if p['requires_clearance']};held=[o for o in usable if o['stage'] in held_names and o.get('retry_index',0)==retry_count]
     valid=[o for o in held if o['clearance_m']>=policy['acceptance']['clearance_m'] and o['contacts']['hand_object_N']>policy['gates']['contact_force_N'] and o['contacts']['support_N']<policy['acceptance']['support_force_N']]
     consecutive=longest=0.;valid_times={o['time_s'] for o in valid}
     for o in obs:
@@ -50,7 +69,7 @@ def verify(experiment):
     finally:b.close()
     result={'schema_version':1,'experiment_id':root.name,'strategy_id':c['workflow']['strategy_id'],'status':'completed' if physical else 'failed',
         'stage':a['stage'],'reason_code':a['failure'] or (None if physical else 'verification_failed'),'physical_task_completed':physical,
-        'native':native,'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'],
+        'native':native,'recovery_count':retry_count,'source_commands_per_attempt':[len(g) for g in groups],'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'],
         'verification_errors':errors,'hold_continuous_s':longest,'hold_valid_s':len(valid)*dt,'hold_total_s':len(held)*dt,'hold_min_clearance_m':min((x['clearance_m'] for x in held),default=None),
         'max_clearance_m':max((x['clearance_m'] for x in usable),default=None),'hold_root_drift_m':drift,
         'max_obstacle_force_N':max((x['contacts']['robot_obstacle_N'] for x in usable),default=None),

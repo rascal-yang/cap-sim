@@ -41,6 +41,8 @@ def implementation_files():
 def _strategy(request):
     s=copy.deepcopy(request['strategy']);s['context']=input_context(request['files'])
     s['provenance']['implementation_sha256']={name:file_hash(path) for name,path in implementation_files().items()}
+    if s['policy']['compensation']['mode']=='bounded_integral':
+        if s['policy']['compensation']['evidence_file'] not in request['files']:raise WorkflowError('invalid_input','Missing feedback evidence')
     if s['policy']['compensation']['mode']=='identified_equilibrium':
         from .calibration import identify_response
         comp=s['policy']['compensation'];scope={'adapter':s['adapter'],'model':s['context']['model'],'initial':s['context']['initial'],'bindings':s['bindings']}
@@ -76,6 +78,9 @@ def _geometry(request,s,proposal=None):
         nominal=nominal_stance(source[entry,1:8],source_object,target_object)
         candidates=[{'id':'current','xyyaw':[*initial[:2],yaw_of(initial[3:7])]},
                     {'id':'object_relative_demonstration','xyyaw':nominal.tolist()}]
+        if 'stance_hint' in files:
+            hint=json.loads(Path(files['stance_hint']).read_text())
+            candidates=[{'id':'preset_stance','xyyaw':hint['xyyaw']}]
         if proposal:candidates+=proposal['stances']
         rows=[]
         for candidate in candidates:
@@ -185,8 +190,8 @@ def prepare(strategy_id,request):
         with (root/'runtime.log').open('w') as log:
             subprocess.run([str(REPO/'scripts/humano_python.sh'),str(REPO/'scripts/check_humano_runtime.py'),'--load-models','--models',str(Path(task['resources']['sonic_models']).resolve()),'--out',str(root/'runtime.json')],check=True,stdout=log,stderr=subprocess.STDOUT,cwd=REPO)
         policy=s['policy'];template.update(experiment_id=root.name,created_at=started,record_status='frozen_ready')
-        template['purpose']={'hypothesis':'Structured strategy executes with explicit model/task settings and source-aligned contact phases',
-            'baseline_paths':[str(Path(files['record']).parent)],'planned_changes':['New independent workflow adapter; dynamic phases/named entities; geometry-derived stance; compensation mode '+policy['compensation']['mode']],
+        template['purpose']={'hypothesis':'Restore evidenced closed-loop wrist correction and preset stance; stable base initiates grasp without wrist-error veto; bounded physical retreat/retry if contact fails',
+            'baseline_paths':[str(Path(files['record']).parent)],'planned_changes':['Independent workflow; named phases; checked preset stance if supplied; compensation mode '+policy['compensation']['mode'],'No pregrasp wrist-error gate; base stability only','Bounded physical recovery from measured state, without simulator resets'],
             'invariants':['No changes to other pipelines','No original-token prefix or implicit fallback','No physical state writes after reset'],
             'known_confounders':['Not a matched controller comparison; new strategy/stance/approach timing','Single-condition execution does not establish generality']}
         template['workflow']={'schema_version':1,'strategy_id':strategy_id,'strategy':s,'selection':selected,'alignment':alignment}
@@ -196,14 +201,16 @@ def prepare(strategy_id,request):
             {'stage':'navigation','mode':'SONIC encoder1 + live locomotion planner','fields':'world velocity m/s; facing yaw rad; body-relative initial wrist/torso hold'},
             {'stage':'settle','mode':'SONIC encoder1','fields':'source entry legs and roll/pitch reference, measured root XYZ/yaw; physically measured support/motion gate'},
             {'stage':'approach','mode':'SONIC encoder1','fields':'measured-state IK/RRT world wrist/torso reference only; explicit timing limits'},
-            {'stage':'contact_phases','mode':'SONIC encoder1','fields':'source world poses with declared command alignment; original finger commands; calibration compensation only if declared'}],
+            {'stage':'contact_phases','mode':'SONIC encoder1','fields':'source world poses with declared command alignment; original finger commands; declared measured feedback'}],
             'settings_and_origins':policy}
-        template['budget']={'attempts_per_case':1,'recovery_attempts':0,'simulation_seconds_per_attempt':policy['budgets']['simulation_s'],'stage_budgets':policy['budgets']}
+        template['control']['postapproach_pose_gate_enabled']=False
+        template['control']['recovery_interfaces']={'open':'SONIC mode1 measured wrist hold + source open finger command','retreat':'SONIC mode1 IK/RRT reference from actual state','retry':'measured object retargeting, base settle, source command restart; controller and physical state continuous'}
+        template['budget']={'attempts_per_case':1,'recovery_attempts':policy.get('recovery',{}).get('max_retries',0),'simulation_seconds_per_attempt':policy['budgets']['simulation_s'],'stage_budgets':policy['budgets']}
         template['physics']['safety_gates']=policy['gates'];template['physics']['acceptance_thresholds']=policy['acceptance']
         template['physics']['control_dt_s']=policy['control_dt_s']
         template['physics']['acceptance_source_and_hash']['independent_validator']=str(Path(__file__).with_name('verification.py'))
         template['pipeline']['entrypoint']='python -m humanoid_mimicgen.workflow execute --experiment '+str(root)
-        template['pipeline']['feedback_and_reflection_rules']='No automatic retry; persist failed attempt and reflection before new strategy revision; API cannot override frozen contract'
+        template['pipeline']['feedback_and_reflection_rules']='Only declared bounded physical retries; save checkpoint and reflection before retry; no state reset or API override of frozen contract'
         write_new(root/'preflight_evidence.json',{'physics_steps':0,'fresh_geometry':geometry,'strategy_id':strategy_id,'actual_sessions':'runtime.json','template_dependencies_verified':True})
         write_new(root/'comparison_diff.json',{'baseline':str(Path(files['record']).parent),'changes':template['purpose']['planned_changes'],'not_a_matched_method_comparison':True})
         hashes=dict(template['preflight']['evidence_sha256']);hashes.update(sonic_files(task));snap=root/'source_snapshot';snap.mkdir()

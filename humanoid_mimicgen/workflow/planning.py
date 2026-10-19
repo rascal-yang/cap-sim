@@ -71,7 +71,7 @@ def measured_approach(model,q,goals,policy):
     path,info=planner.connect(q,solved['qpos'],solved['joint_ids'],**opts['rrt'])
     if path is None:raise WorkflowError('planning_budget_exhausted','Measured stance connection failed')
     limits=policy['approach']
-    times,points=timed_joint_reference(path,joint_speed=limits['joint_speed_rad_s'],minimum_duration=policy['control_dt_s'],dt=policy['control_dt_s'])
+    times,points=timed_joint_reference(path,joint_speed=limits['joint_speed_rad_s'],minimum_duration=limits.get('minimum_duration_s',policy['control_dt_s']),dt=policy['control_dt_s'])
     poses={hand:[] for hand in ('left','right','torso')}
     torso=model.body('torso_link').id
     for point in points:
@@ -94,3 +94,9 @@ def nominal_stance(source_root,source_object,target_object):
     from ..stance_selection import yaw_of
     pose=adapt_poses(np.asarray(source_root),np.asarray(source_object),np.asarray(target_object))
     return np.r_[pose[:2],yaw_of(pose[3:])]
+
+
+def measured_retreat(model,q,measured_start_poses,policy):
+    """Plan physical retreat from current q; torso is an output, not an IK hand."""
+    goals={h:measured_start_poses[h].copy() for h in ('left','right')}
+    return measured_approach(model,q,goals,policy)

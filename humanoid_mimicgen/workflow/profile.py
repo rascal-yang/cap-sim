@@ -4,7 +4,6 @@ from .contracts import WorkflowError, positive, canonical
 REQUIRED={
     'navigation':('speed_m_s','waypoint_radius_m','stop_radius_m'),
     'settle':('window_s','drift_m','speed_m_s','yaw_speed_rad_s','foot_force_N','minimum_s','continuous_s'),
-    'entry':('position_m','orientation_rad','continuous_s'),
     'approach':('joint_speed_rad_s','wrist_speed_m_s','wrist_speed_rad_s'),
     'gates':('contact_force_N','contact_entry_s','contact_loss_s','collision_force_N','collision_duration_s','collision_instant_N',
              'fall_height_m','fall_tilt_rad','precontact_translation_m','precontact_rotation_rad'),
@@ -21,10 +20,18 @@ def validate_policy(p):
         if p['settle']['minimum_s']>p['budgets']['settle_s'] or p['settle']['continuous_s']>p['budgets']['settle_s']:
             raise WorkflowError('invalid_input','Impossible settling budget')
         if p['gates']['collision_instant_N']<p['gates']['collision_force_N']:raise WorkflowError('invalid_input','Collision thresholds reversed')
-        if p['compensation']['mode'] not in ('none','identified_equilibrium'):
+        if p['compensation']['mode'] not in ('none','identified_equilibrium','bounded_integral'):
             raise WorkflowError('invalid_input','Unsupported compensation; no empirical fallback')
         if p['compensation']['mode']=='identified_equilibrium' and (not p['compensation'].get('calibrations') or not p['compensation'].get('scope')):
             raise WorkflowError('needs_calibration')
+        if p['compensation']['mode']=='bounded_integral':
+            for key in ('gain_per_s','cap_m'):positive(p['compensation'][key],key)
+            if not p['compensation'].get('evidence_file'):raise WorkflowError('invalid_input','Feedback requires bound evidence')
+        recovery=p.get('recovery',{'max_retries':0})
+        if type(recovery['max_retries']) is not int or recovery['max_retries']<0:raise WorkflowError('invalid_input','Recovery budget')
+        if recovery['max_retries']:
+            for key in ('release_min_s','release_timeout_s','retreat_timeout_s'):positive(recovery[key],key)
+            if recovery['release_min_s']>recovery['release_timeout_s']:raise WorkflowError('invalid_input','Recovery timing')
         planning=p['planning'];positive(planning['penetration_tolerance_m'],'penetration tolerance',zero=True)
         for group in ('ik','rrt','base_path'):
             if not isinstance(planning[group],dict):raise WorkflowError('invalid_input','Planning options')
