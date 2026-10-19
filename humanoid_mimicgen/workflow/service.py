@@ -30,8 +30,29 @@ def write_new(path,value):
     with path.open('xb') as f:f.write(canonical(value))
 
 
+def implementation_files():
+    files={}
+    for folder in (REPO/'humanoid_mimicgen',REPO/'src/cap_sim'):
+        for path in folder.rglob('*.py'):
+            if 'tests' not in path.parts:files[str(path.relative_to(REPO))]=path
+    return files
+
+
 def _strategy(request):
     s=copy.deepcopy(request['strategy']);s['context']=input_context(request['files'])
+    s['provenance']['implementation_sha256']={name:file_hash(path) for name,path in implementation_files().items()}
+    if s['policy']['compensation']['mode']=='identified_equilibrium':
+        from .calibration import identify_response
+        comp=s['policy']['compensation'];scope={'adapter':s['adapter'],'model':s['context']['model'],'initial':s['context']['initial'],'bindings':s['bindings']}
+        calibrated={}
+        for hand in s['bindings']['hands']:
+            name='calibration_'+hand
+            if name not in request['files']:raise WorkflowError('needs_calibration','Missing measured response for '+hand)
+            trace=np.load(request['files'][name],allow_pickle=False)
+            if 'dt_s' not in trace or not np.isclose(float(trace['dt_s']),s['policy']['control_dt_s']):raise WorkflowError('needs_calibration','Calibration/control sample period mismatch')
+            if json.loads(str(trace['scope_json'].item()))!=scope:raise WorkflowError('needs_calibration','Measured response scope changed')
+            calibrated[hand]=identify_response(trace['command_xyz'],trace['measured_xyz'],scope=scope,max_prediction_error_m=comp['max_prediction_error_m'])
+        comp.update(scope=scope,calibrations=calibrated)
     validate_strategy(s);validate_policy(s['policy'])
     return s
 
@@ -88,6 +109,7 @@ def plan(request):
         if geometry['selected'] is None:raise WorkflowError('unreachable','No checked stance; request a model proposal or new evidence')
         s['proposal']={'stance':geometry['selected'],'decision':proposal,'method':'geometry_checked_candidates'}
         artifacts={f'inputs/{name}{Path(path).suffix}':path for name,path in request['files'].items()}
+        artifacts.update({f'implementation/{name}':path for name,path in implementation_files().items()})
         artifacts.update({f'planning/{p.relative_to(work).as_posix()}':p for p in work.rglob('*') if p.is_file() and p.name!='request.json'})
         # The request contains deployment paths; the immutable strategy context contains hashes.
         ident=Store(request['strategy_root']).save(s,artifacts);status='completed'
@@ -113,6 +135,9 @@ def check_contract(path):
         if c['runtime']['actual_loaded_session_evidence'] not in hashes:raise WorkflowError('preflight_failed','Runtime not bound')
         for name,sha in hashes.items():
             if not Path(name).is_file() or file_hash(name)!=sha:raise WorkflowError('preflight_failed','Evidence changed '+name)
+        from .native import sonic_files
+        for path,sha in sonic_files(json.loads(Path(c['inputs']['task']).read_text())).items():
+            if hashes.get(path)!=sha:raise WorkflowError('preflight_failed','Executed network not bound')
         runtime=json.loads(Path(c['runtime']['actual_loaded_session_evidence']).read_text())
         if not runtime['passed'] or not runtime['sessions_loaded'] or len(runtime['actual_session_providers'])!=3 or any(v!=['CPUExecutionProvider'] for v in runtime['actual_session_providers'].values()):raise WorkflowError('preflight_failed','Actual runtime providers')
         if runtime['versions']['tensorrt']!='10.13.0.35' or runtime['versions']['onnxruntime']!='1.23.2' or runtime['sonic_version']!='1.0':raise WorkflowError('preflight_failed','Runtime versions')
@@ -126,6 +151,8 @@ def prepare(strategy_id,request):
     """Revalidate stored strategy and freeze a fresh, fully evidenced experiment."""
     from ..cli import create_experiment
     bundle=Store(request['strategy_root']).load(strategy_id);s=bundle['strategy'];current=_strategy(request)
+    if s['provenance'].get('implementation_sha256')!=current['provenance']['implementation_sha256']:
+        raise WorkflowError('implementation_changed','Restore recorded code or create a new strategy revision')
     if s['context']!=current['context'] or any(s[k]!=current[k] for k in ('bindings','phases','policy','command_pose_offset','source_frame_count','adapter')):
         raise WorkflowError('context_changed','Create a new strategy revision and revalidate')
     geometry=_geometry(request,s,s['proposal'].get('decision'))
@@ -142,25 +169,28 @@ def prepare(strategy_id,request):
             dest=root/(name+Path(files[name]).suffix);shutil.copyfile(files[name],dest);template['inputs'][name]=str(dest)
         task=json.loads(Path(files['task']).read_text());task['resources']['initial_state']=template['inputs']['initial']
         write_new(root/'task.json',task);template['inputs']['task']=str(root/'task.json')
-        from .native import NativeAdapter,validate_physics
+        from .native import NativeAdapter,validate_physics,validate_model_identity,sonic_files
+        import mujoco
         from ..privileged import no_physics
         with no_physics():
             native=NativeAdapter(task,s,np.load(template['inputs']['initial']))
             try:
+                validate_model_identity(mujoco.MjModel.from_binary_path(template['inputs']['model']),native.m)
                 validate_physics(native.m,json.loads(Path(template['physics']['physics_parameters_manifest']).read_text()))
                 if not np.isclose(native.dt,json.loads(Path(files['alignment']).read_text())['command_dt_s']):raise WorkflowError('unsupported_capability','Source resampling required')
-                write_new(root/'native_preflight.json',{'physics_steps':0,'actual_session_providers':native.providers,'initial_observation':native.observe(),
+                write_new(root/'native_preflight.json',{'physics_steps':0,'actual_session_providers':native.providers,'executed_model_sha256':native.model_files,'planning_execution_model_identical':True,'initial_observation':native.observe(),
                     'model_nq':native.m.nq,'model_nv':native.m.nv,'model_nu':native.m.nu,'physics_dt_s':native.dt,'control_stride':native.control_stride,'bindings_verified':True,'physics_matches_manifest':True})
             finally:native.close()
         alignment=json.loads(Path(files['alignment']).read_text());write_new(root/'strategy.json',s);write_new(root/'stance_selection.json',{'selected':selected,'candidates':geometry['candidates']})
         with (root/'runtime.log').open('w') as log:
-            subprocess.run([str(REPO/'scripts/humano_python.sh'),str(REPO/'scripts/check_humano_runtime.py'),'--load-models','--out',str(root/'runtime.json')],check=True,stdout=log,stderr=subprocess.STDOUT,cwd=REPO)
+            subprocess.run([str(REPO/'scripts/humano_python.sh'),str(REPO/'scripts/check_humano_runtime.py'),'--load-models','--models',str(Path(task['resources']['sonic_models']).resolve()),'--out',str(root/'runtime.json')],check=True,stdout=log,stderr=subprocess.STDOUT,cwd=REPO)
         policy=s['policy'];template.update(experiment_id=root.name,created_at=started,record_status='frozen_ready')
         template['purpose']={'hypothesis':'Structured strategy executes with explicit model/task settings and source-aligned contact phases',
             'baseline_paths':[str(Path(files['record']).parent)],'planned_changes':['New independent workflow adapter; dynamic phases/named entities; geometry-derived stance; compensation mode '+policy['compensation']['mode']],
             'invariants':['No changes to other pipelines','No original-token prefix or implicit fallback','No physical state writes after reset'],
             'known_confounders':['Not a matched controller comparison; new strategy/stance/approach timing','Single-condition execution does not establish generality']}
         template['workflow']={'schema_version':1,'strategy_id':strategy_id,'strategy':s,'selection':selected,'alignment':alignment}
+        template['inputs']={k:template['inputs'][k] for k in ('model','initial','targets','reference_states','task')}
         template['runtime']['actual_loaded_session_evidence']=str(root/'runtime.json')
         template['control']={'fallback_allowed':False,'actual_mode':'SONIC encoder1','prefix':'none','stage_interfaces':[
             {'stage':'navigation','mode':'SONIC encoder1 + live locomotion planner','fields':'world velocity m/s; facing yaw rad; body-relative initial wrist/torso hold'},
@@ -176,7 +206,7 @@ def prepare(strategy_id,request):
         template['pipeline']['feedback_and_reflection_rules']='No automatic retry; persist failed attempt and reflection before new strategy revision; API cannot override frozen contract'
         write_new(root/'preflight_evidence.json',{'physics_steps':0,'fresh_geometry':geometry,'strategy_id':strategy_id,'actual_sessions':'runtime.json','template_dependencies_verified':True})
         write_new(root/'comparison_diff.json',{'baseline':str(Path(files['record']).parent),'changes':template['purpose']['planned_changes'],'not_a_matched_method_comparison':True})
-        hashes=dict(template['preflight']['evidence_sha256']);snap=root/'source_snapshot';snap.mkdir()
+        hashes=dict(template['preflight']['evidence_sha256']);hashes.update(sonic_files(task));snap=root/'source_snapshot';snap.mkdir()
         for source in sorted((REPO/'humanoid_mimicgen').rglob('*.py')):
             hashes[str(source)]=file_hash(source);dest=snap/source.relative_to(REPO/'humanoid_mimicgen');dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,dest)
         for source in root.iterdir():
@@ -185,6 +215,7 @@ def prepare(strategy_id,request):
         hashes[str(bundle['path']/'manifest.json')]=file_hash(bundle['path']/'manifest.json')
         template['preflight'].update(passed=True,evidence_paths=list(hashes),evidence_sha256=hashes,comparison_diff_path=str(root/'comparison_diff.json'))
         template['pipeline']['source_snapshot_and_hashes']=hashes
+        template['pipeline']['git_commit_and_dirty_patch']={'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip(),'source_snapshot':str(snap),'source_sha256':hashes}
         write_new(root/'experiment.json',template);(root/'experiment.sha256').write_text(file_hash(root/'experiment.json')+'\n')
         write_new(root/'freeze.json',{'frozen_at':now(),'sha256':file_hash(root/'experiment.json')});check_contract(root/'experiment.json')
         return {'status':'prepared','experiment_id':root.name,'experiment_path':str(root),'strategy_id':strategy_id}

@@ -36,6 +36,8 @@ def validate_proposal(p,evidence):
     for row in p['stances']:
         if not isinstance(row,dict) or set(row)!={'id','xyyaw'} or not isinstance(row['id'],str) or not row['id'] or row['id'] in names:
             raise WorkflowError('invalid_api_proposal','Candidate ID')
+        
+        if row['id'] in ('current','object_relative_demonstration'):raise WorkflowError('invalid_api_proposal','Reserved candidate ID')
         names.add(row['id']);pose=row['xyyaw']
         if not isinstance(pose,list) or len(pose)!=3 or any(type(x) not in (int,float) for x in pose):
             raise WorkflowError('invalid_api_proposal','Candidate pose')
@@ -44,7 +46,12 @@ def validate_proposal(p,evidence):
 
 def replay_decision(path,evidence,*,provider_identity):
     if not provider_identity:raise WorkflowError('invalid_input','Saved decision provenance required')
-    return validate_proposal(json.loads(Path(path).read_text()),evidence)
+    path=Path(path)
+    audit_path=path.with_name('provenance.json')
+    if not audit_path.is_file():raise WorkflowError('context_changed','Saved decision needs its evidence-bound provenance')
+    audit=json.loads(audit_path.read_text())
+    if audit.get('status')!='completed' or audit.get('evidence_sha256')!=digest(evidence):raise WorkflowError('context_changed','Saved decision evidence changed')
+    return validate_proposal(json.loads(path.read_text()),evidence)
 
 
 class ResponsesDecision:
@@ -55,11 +62,11 @@ class ResponsesDecision:
             raise WorkflowError('invalid_input','HTTPS endpoint without embedded credentials required')
         self.model,self.base_url,self.key_env,self.timeout=model,base_url.rstrip('/'),key_env,positive(timeout_s,'API timeout')
 
-    def propose(self,evidence,out):
+    def propose(self,evidence,out,*,schema=SCHEMA,prompt=PROMPT,validator=validate_proposal):
         out=Path(out);out.mkdir(parents=True,exist_ok=False)
-        body={'model':self.model,'instructions':PROMPT,'input':canonical(evidence).decode(),
-              'text':{'format':{'type':'json_schema','name':'manipulation_decision','strict':True,'schema':SCHEMA}},'store':False}
-        (out/'request.json').write_bytes(canonical(body));(out/'prompt.txt').write_text(PROMPT)
+        body={'model':self.model,'instructions':prompt,'input':canonical(evidence).decode(),
+              'text':{'format':{'type':'json_schema','name':'manipulation_decision','strict':True,'schema':schema}},'store':False}
+        (out/'request.json').write_bytes(canonical(body));(out/'prompt.txt').write_text(prompt)
         audit={'started_at':now(),'status':'failed','model_requested':self.model,'endpoint':self.base_url,
                'evidence_sha256':digest(evidence),'external_model_call':False};tick=time.monotonic()
         try:
@@ -75,7 +82,7 @@ class ResponsesDecision:
             if raw.get('status')!='completed' or not (reported==self.model or reported.startswith(self.model+'-')):
                 raise WorkflowError('invalid_api_proposal','Incomplete response or model mismatch')
             text=''.join(c['text'] for item in raw.get('output',[]) for c in item.get('content',[]) if c.get('type')=='output_text')
-            proposal=validate_proposal(json.loads(text),evidence)
+            proposal=validator(json.loads(text),evidence)
             (out/'response.json').write_bytes(canonical(proposal));audit['status']='completed'
             return proposal
         except WorkflowError as exc:

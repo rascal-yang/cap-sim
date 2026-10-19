@@ -65,6 +65,7 @@ class NativeAdapter:
                 def plan_legs(inner,data,velocity,height,facing_yaw=None):
                     if inner.navigating:Sonic.plan_legs(inner,data,velocity,height,facing_yaw)
                     else:super().plan_legs(data,velocity,height,facing_yaw)
+            self.model_files=sonic_files(task)
             self.sonic=Mode1Sonic(self.m,self.b.robot,task['resources']['sonic_models'],self.b.initial,case='anchored_legs')
             self.providers={k:getattr(self.sonic,k).get_providers() for k in ('encoder','decoder','planner')}
             if any(v!=['CPUExecutionProvider'] for v in self.providers.values()):raise WorkflowError('preflight_failed','Provider mismatch')
@@ -131,3 +132,29 @@ def validate_physics(model,manifest):
              'tolerance':'tolerance','cone':'cone','disableflags':'disableflags','enableflags':'enableflags'}
     for key,attribute in options.items():
         if not np.array_equal(getattr(model.opt,attribute),manifest[key]):raise WorkflowError('preflight_failed','Physics option changed '+key)
+
+
+def model_digest(model):
+    """Compiled model bytes bind geometry, names, topology, dynamics and options."""
+    import mujoco,hashlib
+    buffer=np.empty(mujoco.mj_sizeModel(model),dtype=np.uint8)
+    mujoco.mj_saveModel(model,None,buffer)
+    return hashlib.sha256(buffer.tobytes()).hexdigest()
+
+
+def validate_model_identity(planned,live):
+    if model_digest(planned)!=model_digest(live):
+        raise WorkflowError('preflight_failed','Planning/execution model mismatch')
+
+
+def sonic_files(task):
+    import json
+    from .contracts import file_hash
+    profile=json.loads((Path(__file__).resolve().parents[2]/'runtime/humano-cpu.json').read_text())
+    result={}
+    for relative,expected in profile['sonic']['models'].items():
+        path=(Path(task['resources']['sonic_models'])/relative).resolve()
+        if not path.is_file() or file_hash(path)!=expected:
+            raise WorkflowError('preflight_failed','Executed SONIC model mismatch: '+relative)
+        result[str(path)]=expected
+    return result

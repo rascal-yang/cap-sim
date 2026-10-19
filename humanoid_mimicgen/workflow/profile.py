@@ -4,6 +4,7 @@ from .contracts import WorkflowError, positive, canonical
 REQUIRED={
     'navigation':('speed_m_s','waypoint_radius_m','stop_radius_m'),
     'settle':('window_s','drift_m','speed_m_s','yaw_speed_rad_s','foot_force_N','minimum_s','continuous_s'),
+    'entry':('position_m','orientation_rad','continuous_s'),
     'approach':('joint_speed_rad_s','wrist_speed_m_s','wrist_speed_rad_s'),
     'gates':('contact_force_N','contact_entry_s','contact_loss_s','collision_force_N','collision_duration_s','collision_instant_N',
              'fall_height_m','fall_tilt_rad','precontact_translation_m','precontact_rotation_rad'),

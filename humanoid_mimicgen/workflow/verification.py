@@ -7,33 +7,53 @@ from .service import check_contract, write_new
 
 
 def verify(experiment):
-    root=Path(experiment);c=check_contract(root/'experiment.json');out=root/'execution';s=c['workflow']['strategy'];policy=s['policy']
+    root=Path(experiment)
+    if (root/'result.json').exists():return json.loads((root/'result.json').read_text())
+    c=check_contract(root/'experiment.json');out=root/'execution';s=c['workflow']['strategy'];policy=s['policy']
     a=json.loads((out/'execution_audit.json').read_text());obs=json.loads((out/'observations.json').read_text());commands=json.loads((out/'commands.json').read_text())
     states=np.load(out/'states.npz')['samples'];targets=np.load(c['inputs']['targets']);dt=c['workflow']['alignment']['command_dt_s']
-    if len(states)!=len(obs) or len(obs)!=len(commands) or len(obs)!=a['physics_steps']:raise WorkflowError('verification_failed','Missing measured states')
+    errors=[]
+    if len(states)!=len(obs) or len(obs)!=len(commands) or len(obs)!=a['physics_steps']:errors.append('incomplete_measurements')
+    if not np.isfinite(states).all():errors.append('nonfinite_state')
     if any(x['mode']!=1 for x in commands) or a['original_token_prefix_count'] or a['mode0_calls'] or a['midrun_state_resets'] or a['fallback']:
-        raise WorkflowError('verification_failed','Actual control interface mismatch')
+        errors.append('actual_control_interface_mismatch')
     contact=[x for x in commands if x['source_index']>=0];indices=[x['source_index'] for x in contact]
     expected=list(range(s['phases'][0]['start'],s['phases'][0]['start']+len(contact)))
-    if indices!=expected or any(not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in contact):
-        raise WorkflowError('verification_failed','Source command gap, duplication or substitution')
-    if a['completed'] and (not indices or indices[-1]!=s['phases'][-1]['end']-1):raise WorkflowError('verification_failed','Truncated completion')
-    held_names={p['id'] for p in s['phases'] if p['requires_clearance']};held=[o for o in obs if o['stage'] in held_names]
+    if indices!=expected or any(not 0<=x['source_index']<len(targets['fingers']) or not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in contact):
+        errors.append('source_command_mismatch')
+    if a['completed'] and (not indices or indices[-1]!=s['phases'][-1]['end']-1):errors.append('truncated_completion')
+    # A null measurement is unknown, never evidence of successful contact.
+    from .execution import finite_record
+    def known(value):
+        if value is None:return False
+        if isinstance(value,dict):return all(known(v) for v in value.values())
+        if isinstance(value,list):return all(known(v) for v in value)
+        return True
+    usable=[o for o in obs if known({k:o[k] for k in ('clearance_m','contacts','root_pose')})]
+    if len(usable)!=len(obs):errors.append('unknown_measurements')
+    held_names={p['id'] for p in s['phases'] if p['requires_clearance']};held=[o for o in usable if o['stage'] in held_names]
     valid=[o for o in held if o['clearance_m']>=policy['acceptance']['clearance_m'] and o['contacts']['hand_object_N']>policy['gates']['contact_force_N'] and o['contacts']['support_N']<policy['acceptance']['support_force_N']]
+    consecutive=longest=0.;valid_times={o['time_s'] for o in valid}
+    for o in obs:
+        consecutive=consecutive+dt if o['time_s'] in valid_times else 0.
+        longest=max(longest,consecutive)
     drift=max((float(np.linalg.norm(np.array(o['root_pose'][:2])-held[0]['root_pose'][:2])) for o in held),default=None)
-    physical=bool(a['completed'] and len(valid)==len(held) and len(valid)*dt>=policy['acceptance']['hold_duration_s'] and drift is not None and drift<=policy['acceptance']['root_drift_m'])
+    physical=bool(not errors and not a['failure'] and a['completed'] and len(valid)==len(held) and longest>=policy['acceptance']['hold_duration_s'] and drift is not None and drift<=policy['acceptance']['root_drift_m'])
     from cap_sim.backends.humano import Backend
     from ..privileged import no_physics
-    b=Backend()
+    b=Backend();native=None
     try:
-        with no_physics():b.describe(json.loads(Path(c['inputs']['task']).read_text()));native=b.verify(out)
+        if len(states) and np.isfinite(states).all():
+            with no_physics():b.describe(json.loads(Path(c['inputs']['task']).read_text()));native=b.verify(out)
+    except Exception as exc:
+        errors.append('native_verifier_error:'+type(exc).__name__);physical=False
     finally:b.close()
     result={'schema_version':1,'experiment_id':root.name,'strategy_id':c['workflow']['strategy_id'],'status':'completed' if physical else 'failed',
         'stage':a['stage'],'reason_code':a['failure'] or (None if physical else 'verification_failed'),'physical_task_completed':physical,
         'native':native,'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'],
-        'hold_valid_s':len(valid)*dt,'hold_total_s':len(held)*dt,'hold_min_clearance_m':min((x['clearance_m'] for x in held),default=None),
-        'max_clearance_m':max((x['clearance_m'] for x in obs),default=None),'hold_root_drift_m':drift,
-        'max_obstacle_force_N':max((x['contacts']['robot_obstacle_N'] for x in obs),default=None),
+        'verification_errors':errors,'hold_continuous_s':longest,'hold_valid_s':len(valid)*dt,'hold_total_s':len(held)*dt,'hold_min_clearance_m':min((x['clearance_m'] for x in held),default=None),
+        'max_clearance_m':max((x['clearance_m'] for x in usable),default=None),'hold_root_drift_m':drift,
+        'max_obstacle_force_N':max((x['contacts']['robot_obstacle_N'] for x in usable),default=None),
         'actual_modes':a['actual_encoder_modes'],'training_ready':False,'verified_at':now(),'physics_steps_in_verifier':0,
         'evidence':{'audit':'execution/execution_audit.json','commands':'execution/commands.json','observations':'execution/observations.json','video':None}}
     write_new(root/'result.json',result);write_new(out/'validation.json',result)

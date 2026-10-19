@@ -40,6 +40,7 @@ def build(record,out,*,hands,object_body,support_geom,speed,stop_radius,pose_off
                   'yaw_speed_rad_s':standing['root_local_z_angular_velocity_rad_s'],'foot_force_N':standing['both_foot_ground_min_N'],
                   'minimum_s':standing['minimum_dwell_s'],'continuous_s':standing['continuous_s']},
         'approach':{'joint_speed_rad_s':maxjoint,'wrist_speed_m_s':maxlinear,'wrist_speed_rad_s':maxangular},
+        'entry':{'position_m':standing['position_xy_m'],'orientation_rad':ik['angle_tolerance'],'continuous_s':standing['continuous_s']},
         'planning':{'penetration_tolerance_m':inspect.signature(StationaryPlanner).parameters['penetration_tolerance_m'].default,'ik':ik,'rrt':rrt,'base_path':bp},
         'gates':{'contact_force_N':old['hand_contact_N'],'contact_entry_s':standing['continuous_s'],
                  'contact_loss_s':g['lift_hold_contact_loss_s'],'collision_force_N':g['robot_table_force_N'],
@@ -55,6 +56,7 @@ def build(record,out,*,hands,object_body,support_geom,speed,stop_radius,pose_off
         if name=='origins':continue
         kind='numerical_setting' if name=='planning' else 'explicit_disabled' if name=='compensation' else 'task_requirement'
         evidence='Explicit CLI speed/stop-radius; no fixed stance offset' if name=='navigation' else 'Source contact measured speed extrema' if name=='approach' else 'Historical evidence migration; review supplied record for applicability'
+        if name=='entry':evidence='Historical task position allowance and solver angular tolerance; explicit migration fixture only, not generic defaults'
         policy['origins'][name]={'kind':kind,'evidence':evidence}
     alignment={'finger_source':'executed_commands','command_dt_s':dt,'pose_alignment':'explicit_offset','origin_record':os.path.relpath(record,out)}
     (out/'alignment.json').write_text(json.dumps(alignment,indent=2))

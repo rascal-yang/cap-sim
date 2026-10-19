@@ -66,3 +66,24 @@ Interfaces: plan(request), prepare(strategy_id,request), execute(experiment_id),
 ## Execution authorization / ledger
 
 User explicitly requested “开始实现”; execute inline without another permission round. Work in a new package in the current checkout: existing untracked source and frozen absolute hashes make a detached worktree an unsuitable implementation base. This preserves the requested route isolation; file-hash inventory verifies no existing implementation file changes.
+
+
+### Implementation ledger
+
+- Baselines: core71/71 and historical mimicgen135/135 passed separately; combined collection has pre-existing duplicate module names.
+- Tasks1–4: initial implementation committed a3cb8b3; 16 new tests passed before first physical run; further regression coverage in progress.
+- Physical regression20261019_1946_workflow_native: real SONIC mode1,1789steps, contact_lost in lift; task not successful. Full measured evidence and reflection retained.
+- Ruling: no empirical integral gain/cap in generic route. Optional locally identified equilibrium compensation replaces the old trial-specific tuning; its physical behavior needs separate validation. Cost: old success cannot be claimed for the new policy.
+- Ruling: use explicit G1 adapter and deterministic source-phase inputs; current Responses action schema proposes stances/requests observations/aborts. Existing annotation provider supplies source labels; arbitrary new grasp-strategy synthesis remains outside current native capability rather than being silently guessed.
+- Ruling: preserve current working checkout and isolate added package, because pre-existing untracked modules and frozen absolute evidence paths are dependencies. Verify file-hash inventory before completion.
+
+
+### Final implementation and review record
+
+- Final new-suite verification: 26 passed; legacy MimicGen 135 passed; core 71 passed. Historical source inventory: all 230 recorded files unchanged. Only workflow package and its design/implementation records changed.
+- One independent code review found five issues. Fixed exact executed ONNX binding, compiled planning/live model identity, measured approach-entry criteria, interrupted-step/nonfinite failure publication, and bounded skill/hand/approach/segment/recovery selection. Regression tests cover geometry mismatch, entry readiness, unknown measurements, failed-step publication, and constrained/offline model selection.
+- The final API route selects among supplied evidenced skills; it does not invent unannotated contact commands or controller gains. Recovery declares initial/terminal-state origin and creates a newly planned, frozen attempt. Provider protocol tests used stubs; no remote GPT-6 success is claimed.
+- Final physical attempt: 20261019_2004_workflow_native, frozen strategy b2b08bcc21705cd78e717dd916563745d635f2867144432cfe9fa69dcad50726. Actual 10000 physics steps / 50 seconds, mode1 only, no prefix, fallback, or midrun resets. Failed before grasp because declared measured-entry criteria were not continuously satisfied; global budget exhausted. This is an honest failure, not proof of unreachable grasp.
+- First attempt reached lift but lost contact; final attempt exercised the new measured-entry wait/stop path. Neither establishes successful generic grasp after removing empirical compensation. The imported example's 0.03-rad angular criterion comes from the declared migration fixture; it is not a calibrated task capture tolerance. A future physically evidenced capture region/calibration is needed before asserting production training yield.
+- Both attempts preserve dual-view MP4s, full decode and sampled visual evidence, Chinese standalone videos, measured reports and reflection. Native-rate temporal visual review remains incomplete: training_ready=false. These are implementation regression artifacts, not the formal ten-condition comparison.
+- No new physical retry was launched after final failure. Failure reflection is stored before any later strategy revision. All code/config/inputs/models are retained by immutable strategies and frozen experiment source snapshots; hardware bitwise reproducibility is not promised.

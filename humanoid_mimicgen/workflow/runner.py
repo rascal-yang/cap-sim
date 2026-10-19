@@ -4,8 +4,8 @@ import time
 from pathlib import Path
 import numpy as np
 from .contracts import WorkflowError, canonical, now, phase_at
-from .execution import GateMonitor, base_is_stable
-from .native import NativeAdapter, validate_physics
+from .execution import GateMonitor, base_is_stable, entry_ready, finite_record
+from .native import NativeAdapter, validate_physics, validate_model_identity
 from .planning import measured_approach, navigate_command, validate_source
 from .calibration import equilibrium_command
 
@@ -25,13 +25,17 @@ def execute_native(contract):
     task=json.loads(Path(c['inputs']['task']).read_text());start=now();clock=time.monotonic();adapter=None
     states=[];observations=[];commands=[];tracking=[];events=[];failure=None;error_type=None;steps=0;stage='navigation';online_planning_s=0.
     stage_started=0.;settled=0.;gate=GateMonitor(policy['gates']);phase_id=None;completed=False;holdposes=None;plan_times=plan_poses=None
+    entry_stable=0.;attempted=[]
     contact_started=None;feedback_log=[];goalposes=None
-    def write(name,value):(out/name).write_bytes(canonical(value))
+    def write(name,value):(out/name).write_bytes(canonical(finite_record(value)))
     try:
         adapter=NativeAdapter(task,strategy,initial);m,d=adapter.m,adapter.d;dt=adapter.dt;stride=adapter.control_stride
         if not np.isclose(c['workflow']['alignment']['command_dt_s'],dt):raise WorkflowError('unsupported_capability','Source command resampling is not implicit')
         physics=json.loads(Path(c['physics']['physics_parameters_manifest']).read_text())
         validate_physics(m,physics)
+        import mujoco
+        validate_model_identity(mujoco.MjModel.from_binary_path(c['inputs']['model']),m)
+        write('actual_model_files.json',adapter.model_files)
         write('actual_providers.json',adapter.providers)
         np.savez_compressed(out/'actual_initial.npz',qpos=d.qpos.copy(),qvel=d.qvel.copy(),ctrl=d.ctrl.copy(),qacc_warmstart=d.qacc_warmstart.copy())
         initial_pose=adapter.poses();initial_rot=rot(d.qpos[3:7]);rel={s:(initial_rot.inv().apply(p[:3]-d.qpos[:3]),initial_rot.inv()*rot(p[3:])) for s,p in initial_pose.items()}
@@ -77,9 +81,9 @@ def execute_native(contract):
                 tracking.append(row)
             fingers=targets['fingers'][frame if contact_stage else entry]
             adapter.command(goalposes,velocity,face,float(source[entry,3]),fingers,policy_tick=tick)
-            commands.append({'time_s':float(d.time),'stage':label,'source_index':source_index,'mode':1,'fingers_rad':fingers.tolist(),'body_target_rad':adapter.last_target.tolist(),'ctrl_Nm':d.ctrl.tolist()})
+            attempted.append({'time_s':float(d.time),'stage':label,'source_index':source_index,'mode':1,'fingers_rad':fingers.tolist(),'body_target_rad':adapter.last_target.tolist(),'ctrl_Nm':d.ctrl.tolist()})
             adapter.step();steps+=1;ob=adapter.observe();ob.update(stage=label,source_poststep_frame=source_index)
-            states.append(np.r_[d.time,d.qpos,d.qvel,d.ctrl]);observations.append(ob)
+            states.append(np.r_[d.time,d.qpos,d.qvel,d.ctrl]);observations.append(ob);commands.append(attempted[-1])
             limits=policy['gates'];contacts=ob['contacts'];failure=gate.update(dt,hand_force=contacts['hand_object_N'],obstacle_force=contacts['robot_obstacle_N'],requires_contact=bool(phase and phase['requires_contact']))
             if failure:break
             tilt=float(np.arccos(np.clip(rot(d.qpos[3:7]).as_matrix()[2,2],-1,1)))
@@ -106,8 +110,14 @@ def execute_native(contract):
                     targets['torso_pose'][:]=plan_poses['torso'][-1];np.savez_compressed(out/'adapted_execution_targets.npz',**targets)
                     stage='approach';stage_started=float(d.time);events.append({'event':'measured_stance_plan','time_s':float(d.time),'actual_root':d.qpos[:7].tolist()})
                 elif elapsed>=policy['budgets']['settle_s']:raise WorkflowError('settling_timeout')
-            elif stage=='approach' and float(d.time)-stage_started>=plan_times[-1] and steps%stride==0:
-                stage='contact';contact_started=float(d.time);events.append({'event':'contact_started','time_s':contact_started,'actual_root':d.qpos[:7].tolist()})
+            elif stage=='approach':
+                elapsed=float(d.time)-stage_started
+                ready=entry_ready(adapter.poses(),{h:targets[h+'_pose'][entry] for h in bindings['hands']},bindings['hands'],policy['entry'])
+                entry_stable=entry_stable+dt if ready else 0.
+                ob.update(entry_ready=ready,entry_stable_s=entry_stable)
+                if elapsed>=plan_times[-1] and entry_stable+1e-12>=policy['entry']['continuous_s'] and steps%stride==0:
+                    stage='contact';contact_started=float(d.time);events.append({'event':'contact_started','time_s':contact_started,'actual_root':d.qpos[:7].tolist(),'measured_entry_verified':True})
+                elif elapsed>=policy['budgets']['approach_s']:raise WorkflowError('approach_entry_timeout')
             elif contact_stage:
                 frame+=1
                 if frame==last:completed=True;break
@@ -117,14 +127,16 @@ def execute_native(contract):
         write('error.json',{'reason_code':failure,'error_type':error_type,'detail':exc.detail if isinstance(exc,WorkflowError) else str(exc)})
     finally:
         np.savez_compressed(out/'states.npz',samples=np.asarray(states))
-        for name,value in [('observations',observations),('commands',commands),('tracking',tracking),('events',events),('contacts',[x['contacts'] for x in observations])]:write(name+'.json',value)
+        for name,value in [('observations',observations),('commands',commands),('attempted_commands',attempted),('tracking',tracking),('events',events),('contacts',[x['contacts'] for x in observations])]:write(name+'.json',value)
         if adapter:
             write('controller.json',adapter.sonic.records);write('planner.json',adapter.sonic.planner_records)
         audit={'experiment_id':root.name,'started_at':start,'ended_at':now(),'simulation_wall_s':time.monotonic()-clock,
                'online_planning_wall_s':online_planning_s,'sim_seconds':float(adapter.d.time) if adapter else 0.,
-               'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),
+               'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),'attempted_commands':len(attempted),'completed_commands':len(commands),
                'actual_encoder_modes':sorted(set(x['mode'] for x in commands)),'original_token_prefix_count':0,'mode0_calls':0,
                'midrun_state_resets':0,'fallback':False,'contact_started_at_s':contact_started,'stage':stage,'source_end_exclusive':frame}
         write('execution_audit.json',audit)
-        if adapter:adapter.close()
+        if adapter:
+            np.savez_compressed(out/'terminal.npz',qpos=adapter.d.qpos.copy(),qvel=adapter.d.qvel.copy(),ctrl=adapter.d.ctrl.copy(),qacc_warmstart=adapter.d.qacc_warmstart.copy())
+            adapter.close()
     return audit
