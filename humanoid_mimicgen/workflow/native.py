@@ -69,11 +69,13 @@ class NativeAdapter:
                         speed=float(np.linalg.norm(velocity))
                         inner.planner_records.append({'time':float(data.time),'type':'live_locomotion','planner_mode':1 if speed>1e-6 else 4,'encoder_mode':1,'velocity_world_xy_m_s':np.asarray(velocity).tolist(),'target_vel':speed if speed>1e-6 else -1,'reference':inner.ref.tolist()})
                     elif inner.tick>=inner.handoff_until_tick:super().plan_legs(data,velocity,height,facing_yaw)
-                def blend_to_standing(inner,anchor,duration):
+                def blend_to_standing(inner,anchor,duration,measured_start=None):
                     from .motion import blend_stance_reference
                     # SONIC reference frames are 30 Hz, independent of physics.
                     count=max(100,int(np.ceil(duration*30))+31)
-                    if inner.ref is None:
+                    if measured_start is not None:
+                        future=np.repeat(np.asarray(measured_start)[None],count,axis=0)
+                    elif inner.ref is None:
                         future=np.repeat(np.r_[self.d.qpos[:7],self.d.qpos[inner.qids]][None],count,axis=0)
                     else:future=inner.sample((inner.tick-inner.ref_tick)*.6+np.arange(count))
                     inner.anchor=anchor.copy();inner.navigating=False

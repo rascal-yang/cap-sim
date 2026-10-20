@@ -6,7 +6,7 @@ import numpy as np
 from .contracts import WorkflowError, canonical, now, phase_at
 from .execution import GateMonitor, base_is_stable, finite_record
 from .native import NativeAdapter, validate_physics, validate_model_identity
-from .planning import measured_approach, measured_retreat, measured_posture_retreat, navigate_command, validate_source
+from .planning import measured_approach, measured_retreat, measured_posture_retreat, navigate_command, validate_source, measured_navigation_path
 from .calibration import equilibrium_command
 from .feedback import IntegralFeedback,can_recover
 
@@ -34,6 +34,9 @@ def execute_native(contract):
     nav=policy['navigation'];smooth=nav.get('profile')=='distance_velocity'
     velocity_profile=DistanceVelocityProfile(speed=nav['speed_m_s'],acceleration=nav['acceleration_m_s2'],response_s=nav['response_s']) if smooth else None
     nav_velocity=np.zeros(2);nav_quiet_s=0.;normal_q=None;recovery_settled=0.;posture_audit=None
+    from .parking import RecentWindow,predicted_stop,correction_decision,planted_stance_reference,corrected_reference
+    parking=nav.get('parking');correction=nav.get('correction');nav_cycle=0;nav_previous_error=None
+    nav_elapsed=0.;nav_cycle_started=0.;parking_finished=False;nav_settle_pending=True;nav_log=[];stop_prediction=None;stance_shift_until=0.;parking_reference_xy=goal[:2].copy()
     def write(name,value):(out/name).write_bytes(canonical(finite_record(value)))
     def begin_recovery(reason,ob):
         nonlocal retry_index,stage,stage_started,holdposes,gate,phase_id,force_tick,failure
@@ -50,6 +53,7 @@ def execute_native(contract):
         return True
     try:
         adapter=NativeAdapter(task,strategy,initial);m,d=adapter.m,adapter.d;dt=adapter.dt;stride=adapter.control_stride
+        recent=RecentWindow(policy['settle']['window_s'],dt)
         if not np.isclose(c['workflow']['alignment']['command_dt_s'],dt):raise WorkflowError('unsupported_capability','Source command resampling is not implicit')
         physics=json.loads(Path(c['physics']['physics_parameters_manifest']).read_text())
         validate_physics(m,physics)
@@ -64,17 +68,36 @@ def execute_native(contract):
         while steps<maxsteps:
             tick=steps%stride==0 or force_tick;force_tick=False;profile_updated=False;velocity=np.zeros(2);face=float(goal[2]);source_index=-1
             if stage=='navigation':
-                velocity,face,arrived,waypoint=navigate_command([*d.qpos[:2],rot(d.qpos[3:7]).as_euler('xyz')[2]],route,waypoint,policy['navigation'])
+                nav_limits=dict(nav)
+                if nav_cycle:nav_limits['stop_radius_m']=correction['tolerance_m']
+                velocity,face,arrived,waypoint=navigate_command([*d.qpos[:2],rot(d.qpos[3:7]).as_euler('xyz')[2]],route,waypoint,nav_limits)
+                terminal_waypoint=np.array_equal(route[waypoint,:2],route[-1,:2])
+                stop_prediction=None
+                if parking and terminal_waypoint:
+                    stop_prediction=predicted_stop(d.qpos[:2],d.qvel[:2],parking['model'])
+                    delta=goal[:2]-d.qpos[:2]
+                    arrived=bool(np.linalg.norm(goal[:2]-stop_prediction)<=parking['trigger_radius_m'] or
+                                 np.linalg.norm(delta)<=parking['trigger_radius_m'] or np.dot(goal[:2]-stop_prediction,delta)<=0.)
+                correction_timeout=bool(nav_cycle and float(d.time)-nav_cycle_started>=correction['max_duration_s'])
+                arrived=arrived or correction_timeout
                 if smooth:
                     if tick:
                         profile_updated=True
-                        nav_velocity=velocity_profile.step(route[waypoint,:2]-d.qpos[:2],policy['control_dt_s'],measured_velocity=d.qvel[:2])
+                        drive_delta=route[waypoint,:2]-d.qpos[:2]
+                        if nav_cycle and np.linalg.norm(drive_delta)>0:
+                            # Bounded motion at the established speed ceiling;
+                            # avoid indefinite low-speed gait for tiny errors.
+                            drive_delta=drive_delta/np.linalg.norm(drive_delta)*max(np.linalg.norm(drive_delta),nav['speed_m_s']*nav['response_s'])
+                        nav_velocity=velocity_profile.step(drive_delta,policy['control_dt_s'],measured_velocity=None if nav_cycle else d.qvel[:2])
                         slow=np.linalg.norm(d.qvel[:2])<=policy['settle']['speed_m_s'] and abs(d.qvel[5])<=policy['settle']['yaw_speed_rad_s']
                         quiet=arrived and slow and np.linalg.norm(nav_velocity)<=policy['settle']['speed_m_s']
                         nav_quiet_s=nav_quiet_s+policy['control_dt_s'] if quiet else 0.
                     velocity=nav_velocity.copy()
                     # Enter blended standing on geometric arrival; walking at tiny
                     # speeds does not itself guarantee a stable idle gait.
+                if tick:nav_log.append({'time_s':float(d.time),'navigation_cycle':nav_cycle,'actual_xy':d.qpos[:2].tolist(),
+                    'velocity_xy_m_s':d.qvel[:2].tolist(),'command_xy_m_s':velocity.tolist(),'predicted_stop_xy':stop_prediction.tolist() if stop_prediction is not None else None,
+                    'goal_xy':goal[:2].tolist(),'correction_timeout':correction_timeout})
                 if arrived and tick:
                     prehandoff_velocity=velocity.copy()
                     adapter.sonic.navigating=False
@@ -84,8 +107,8 @@ def execute_native(contract):
                     if smooth:adapter.sonic.blend_to_standing(adapter.sonic.anchor,nav['response_s'])
                     else:adapter.sonic.ref=None
                     holdposes=adapter.poses();stage='settle';stage_started=float(d.time);velocity[:]=0
-                    events.append({'event':'navigation_stop_requested','time_s':float(d.time),'actual_root':d.qpos[:7].tolist(),'goal_xyyaw':goal.tolist(),'measured_velocity_xy_m_s':d.qvel[:2].tolist(),'command_velocity_xy_m_s':prehandoff_velocity.tolist(),'quiet_duration_s':nav_quiet_s})
-                elif d.time>=policy['budgets']['navigation_s']:raise WorkflowError('navigation_timeout')
+                    events.append({'event':'navigation_stop_requested','time_s':float(d.time),'actual_root':d.qpos[:7].tolist(),'goal_xyyaw':goal.tolist(),'measured_velocity_xy_m_s':d.qvel[:2].tolist(),'command_velocity_xy_m_s':prehandoff_velocity.tolist(),'quiet_duration_s':nav_quiet_s,'navigation_cycle':nav_cycle,'predicted_stop_xy':stop_prediction.tolist() if stop_prediction is not None else None,'correction_timeout':correction_timeout})
+                elif nav_elapsed>=policy['budgets']['navigation_s']:raise WorkflowError('navigation_timeout')
             if smooth and stage!='navigation':
                 if tick and not profile_updated:nav_velocity=velocity_profile.step([0.,0.],policy['control_dt_s'])
                 velocity=nav_velocity.copy()
@@ -129,7 +152,8 @@ def execute_native(contract):
             adapter.command(goalposes,velocity,face,float(source[entry,3]),fingers,policy_tick=tick)
             attempted.append({'time_s':float(d.time),'stage':label,'source_index':source_index,'retry_index':retry_index,'mode':1,'velocity_world_xy_m_s':velocity.tolist(),'locomotion_planner_active':bool(adapter.sonic.navigating),'fingers_rad':fingers.tolist(),'body_target_rad':adapter.last_target.tolist(),'ctrl_Nm':d.ctrl.tolist()})
             adapter.step();steps+=1;ob=adapter.observe();ob.update(stage=label,source_poststep_frame=source_index,retry_index=retry_index)
-            states.append(np.r_[d.time,d.qpos,d.qvel,d.ctrl]);observations.append(ob);commands.append(attempted[-1])
+            states.append(np.r_[d.time,d.qpos,d.qvel,d.ctrl]);observations.append(ob);recent.append(ob);commands.append(attempted[-1])
+            if label=='navigation':nav_elapsed+=dt
             limits=policy['gates'];contacts=ob['contacts'];failure=gate.update(dt,hand_force=contacts['hand_object_N'],obstacle_force=contacts['robot_obstacle_N'],requires_contact=bool(phase and phase['requires_contact']))
             tilt=float(np.arccos(np.clip(rot(d.qpos[3:7]).as_matrix()[2,2],-1,1)))
             if not np.isfinite(d.qpos).all() or not np.isfinite(d.qvel).all():raise WorkflowError('nonfinite_state')
@@ -145,12 +169,46 @@ def execute_native(contract):
                 if contacts['robot_object_N']>limits['contact_force_N']:raise WorkflowError('premature_object_contact')
             if stage=='settle':
                 elapsed=float(d.time)-stage_started;window=policy['settle']['window_s']
-                rows=[x for x in observations if x['time_s']>=float(d.time)-window-dt/2]
+                rows=recent.rows
                 drift=None if elapsed<window or not rows else max(float(np.linalg.norm(np.array(x['root_pose'][:2])-rows[0]['root_pose'][:2])) for x in rows)
-                ob['recent_root_drift_m']=drift;stable=base_is_stable(ob,policy['settle']);settled=settled+dt if stable else 0.
+                ob['recent_root_drift_m']=drift;stable=base_is_stable(ob,policy['settle']);settled=settled+dt if stable and float(d.time)>=stance_shift_until else 0.
                 ob.update(stable_sample=stable,continuous_stable_s=settled)
                 if elapsed>=policy['settle']['minimum_s'] and steps%stride==0 and settled+1e-12>=policy['settle']['continuous_s']:
                     actual=adapter.poses()
+                    if nav_settle_pending:
+                        error=float(np.linalg.norm(d.qpos[:2]-goal[:2]))
+                        events.append({'event':'navigation_settled','time_s':float(d.time),'navigation_cycle':nav_cycle,'actual_root':d.qpos[:7].tolist(),'error_m':error})
+                        nav_settle_pending=False
+                    if correction and not parking_finished:
+                        decision=correction_decision(error,nav_previous_error,nav_cycle,correction)
+                        events.append({'event':'parking_decision','time_s':float(d.time),'navigation_cycle':nav_cycle,'error_m':error,'previous_error_m':nav_previous_error,'decision':decision})
+                        if decision=='correct' and correction.get('method','walk')=='planted_feet':
+                            reference_xy=corrected_reference(parking_reference_xy,goal[:2],d.qpos[:2]) if nav_cycle and correction.get('residual_feedback',False) else parking_reference_xy.copy()
+                            pstart=time.monotonic();target_q,shift_audit=planted_stance_reference(m,d.qpos.copy(),np.r_[reference_xy,goal[2]],bindings,policy,ob['contacts']['events']);online_planning_s+=time.monotonic()-pstart
+                            write('stance_correction_'+str(nav_cycle+1)+'.json',shift_audit)
+                            if target_q is not None:
+                                parking_reference_xy=reference_xy.copy();nav_previous_error=error;nav_cycle+=1;holdposes=actual
+                                anchor=np.r_[target_q[:7],target_q[adapter.b.qids]]
+                                adapter.sonic.blend_to_standing(anchor,shift_audit['duration_s'],measured_start=np.r_[d.qpos[:7],d.qpos[adapter.b.qids]])
+                                stage_started=float(d.time);stance_shift_until=stage_started+shift_audit['duration_s'];settled=0.;nav_settle_pending=True;force_tick=True
+                                events.append({'event':'correction_started','method':'planted_feet','time_s':float(d.time),'navigation_cycle':nav_cycle,'error_m':error,'duration_s':shift_audit['duration_s'],'reference_root_xy':parking_reference_xy.tolist(),'evaluation_goal_xy':goal[:2].tolist()})
+                                continue
+                            events.append({'event':'correction_skipped','time_s':float(d.time),'reason':'stationary_geometry_or_support_check_failed'})
+                            parking_finished=True
+                        if decision=='correct' and correction.get('method','walk')=='walk' and nav_elapsed<policy['budgets']['navigation_s']:
+                            pstart=time.monotonic();new_route,route_audit=measured_navigation_path(m,d.qpos.copy(),goal,policy);online_planning_s+=time.monotonic()-pstart
+                            write('correction_route_'+str(nav_cycle+1)+'.json',{'audit':route_audit,'path':new_route.tolist() if new_route is not None else None,'actual_root':d.qpos[:7].tolist(),'physics_steps':0})
+                            if new_route is not None:
+                                nav_previous_error=error;nav_cycle+=1;route=np.asarray(new_route);waypoint=1
+                                heading=rot(d.qpos[3:7]);rel={h:(heading.inv().apply(p[:3]-d.qpos[:3]),heading.inv()*rot(p[3:])) for h,p in actual.items()}
+                                adapter.sonic.navigating=True;adapter.sonic.ref=None;adapter.sonic.handoff_until_tick=-1
+                                # Reset only command generator state at rest, never robot/controller history.
+                                velocity_profile=DistanceVelocityProfile(speed=nav['speed_m_s'],acceleration=nav['acceleration_m_s2'],response_s=nav['response_s'])
+                                nav_velocity=np.zeros(2);nav_quiet_s=0.;settled=0.;stage='navigation';nav_cycle_started=float(d.time);nav_settle_pending=True;force_tick=True
+                                events.append({'event':'correction_started','time_s':float(d.time),'navigation_cycle':nav_cycle,'error_m':error})
+                                continue
+                            events.append({'event':'correction_skipped','time_s':float(d.time),'reason':'no_collision_checked_route'})
+                        parking_finished=True
                     if retreat_goals is None:
                         retreat_goals={h:p.copy() for h,p in actual.items()};normal_q=d.qpos.copy()
                         np.save(out/'normal_posture_qpos.npy',normal_q)
@@ -165,9 +223,9 @@ def execute_native(contract):
             elif stage=='approach':
                 elapsed=float(d.time)-stage_started
                 window=policy['settle']['window_s']
-                rows=[x for x in observations if x['time_s']>=float(d.time)-window-dt/2]
+                rows=recent.rows
                 ob['recent_root_drift_m']=None if elapsed<window else max(float(np.linalg.norm(np.array(x['root_pose'][:2])-rows[0]['root_pose'][:2])) for x in rows)
-                stable=base_is_stable(ob,policy['settle']);settled=settled+dt if stable else 0.
+                stable=base_is_stable(ob,policy['settle']);settled=settled+dt if stable and float(d.time)>=stance_shift_until else 0.
                 ob.update(stable_sample=stable,continuous_stable_s=settled)
                 if elapsed>=plan_times[-1] and settled+1e-12>=policy['settle']['continuous_s'] and steps%stride==0:
                     stage='contact';contact_started=float(d.time);events.append({'event':'contact_started','retry_index':retry_index,'time_s':contact_started,'actual_root':d.qpos[:7].tolist(),'base_stable':True,'wrist_pose_gate':False})
@@ -217,12 +275,12 @@ def execute_native(contract):
         write('error.json',{'reason_code':failure,'error_type':error_type,'detail':exc.detail if isinstance(exc,WorkflowError) else str(exc)})
     finally:
         np.savez_compressed(out/'states.npz',samples=np.asarray(states))
-        for name,value in [('observations',observations),('commands',commands),('attempted_commands',attempted),('tracking',tracking),('feedback',feedback_log),('events',events),('contacts',[x['contacts'] for x in observations])]:write(name+'.json',value)
+        for name,value in [('observations',observations),('commands',commands),('attempted_commands',attempted),('tracking',tracking),('feedback',feedback_log),('navigation',nav_log),('events',events),('contacts',[x['contacts'] for x in observations])]:write(name+'.json',value)
         if adapter:
             write('controller.json',adapter.sonic.records);write('planner.json',adapter.sonic.planner_records)
         audit={'experiment_id':root.name,'started_at':start,'ended_at':now(),'simulation_wall_s':time.monotonic()-clock,
                'online_planning_wall_s':online_planning_s,'sim_seconds':float(adapter.d.time) if adapter else 0.,
-               'recovery_count':retry_index,'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),'attempted_commands':len(attempted),'completed_commands':len(commands),
+               'navigation_corrections':nav_cycle,'navigation_sim_s':nav_elapsed,'api_calls_during_execution':0,'recovery_count':retry_index,'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),'attempted_commands':len(attempted),'completed_commands':len(commands),
                'actual_encoder_modes':sorted(set(x['mode'] for x in commands)),'original_token_prefix_count':0,'mode0_calls':0,
                'midrun_state_resets':0,'fallback':False,'contact_started_at_s':contact_started,'stage':stage,'source_end_exclusive':frame}
         write('execution_audit.json',audit)

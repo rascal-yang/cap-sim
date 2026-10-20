@@ -32,6 +32,20 @@ def validate_policy(p):
         if nav.get('profile') not in (None,'distance_velocity'):raise WorkflowError('invalid_input','Navigation profile')
         if nav.get('profile')=='distance_velocity':
             for key in ('acceleration_m_s2','response_s'):positive(nav[key],key)
+        if 'parking' in nav:
+            park=nav['parking']
+            if park['mode']!='predicted_stop' or nav.get('profile')!='distance_velocity':raise WorkflowError('invalid_input','Predictive parking requires smooth navigation')
+            positive(park['trigger_radius_m'],'parking trigger radius')
+            positive(park['max_residual_m'],'stopping model residual')
+            if type(park['minimum_samples']) is not int or park['minimum_samples']<2:raise WorkflowError('invalid_input','At least two distinct stopping samples required')
+            if not park.get('evidence_file'):raise WorkflowError('needs_calibration','Parking evidence required')
+        if 'correction' in nav:
+            corr=nav['correction']
+            if type(corr.get('residual_feedback',False)) is not bool:raise WorkflowError('invalid_input','Residual feedback flag')
+            if corr.get('method','walk') not in ('walk','planted_feet'):raise WorkflowError('invalid_input','Correction interface')
+            if nav.get('profile')!='distance_velocity':raise WorkflowError('invalid_input','Correction requires smooth navigation')
+            if type(corr['max_corrections']) is not int or corr['max_corrections']<0:raise WorkflowError('invalid_input','Correction count')
+            for key in ('tolerance_m','minimum_progress_m','max_duration_s'):positive(corr[key],key)
         recovery=p.get('recovery',{'max_retries':0})
         if type(recovery['max_retries']) is not int or recovery['max_retries']<0:raise WorkflowError('invalid_input','Recovery budget')
         if recovery.get('posture_restore',False):

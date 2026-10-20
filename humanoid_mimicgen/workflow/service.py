@@ -55,6 +55,14 @@ def _strategy(request):
             if json.loads(str(trace['scope_json'].item()))!=scope:raise WorkflowError('needs_calibration','Measured response scope changed')
             calibrated[hand]=identify_response(trace['command_xyz'],trace['measured_xyz'],scope=scope,max_prediction_error_m=comp['max_prediction_error_m'])
         comp.update(scope=scope,calibrations=calibrated)
+    if 'parking' in s['policy']['navigation']:
+        from .parking import response_scope,validate_calibration
+        from .native import sonic_files
+        park=s['policy']['navigation']['parking'];name=park['evidence_file']
+        if name not in request['files']:raise WorkflowError('needs_calibration','Missing parking calibration')
+        record=json.loads(Path(request['files']['record']).read_text())
+        scope=response_scope(s,s['context']['model'],s['context']['reference_states'],file_hash(record['physics']['physics_parameters_manifest']),sonic_files(json.loads(Path(request['files']['task']).read_text())))
+        park['model']=validate_calibration(json.loads(Path(request['files'][name]).read_text()),scope,park)
     validate_strategy(s);validate_policy(s['policy'])
     return s
 
@@ -215,6 +223,8 @@ def prepare(strategy_id,request):
             template['control']['stage_interfaces'][1]['fields']='source entry legs, world-up roll/pitch, measured root XYZ/yaw; physically measured support/motion gate'
         if policy.get('recovery',{}).get('posture_restore',False):
             template['control']['recovery_interfaces']['retreat']='SONIC mode1 FK of collision-checked arms+waist joint path to first stable normal posture in current root frame; measured joint/wrist/torso convergence before retry'
+        if 'parking' in policy['navigation'] or 'correction' in policy['navigation']:
+            template['control']['parking']='Declared measured stopping predictor and bounded post-settle correction; walk uses checked route; planted_feet uses newly planned leg IK with measured world foot holds and COM support screening, executed only through SONIC encoder1; no GPT or state reset'
         template['budget']={'attempts_per_case':1,'recovery_attempts':policy.get('recovery',{}).get('max_retries',0),'simulation_seconds_per_attempt':policy['budgets']['simulation_s'],'stage_budgets':policy['budgets']}
         template['physics']['safety_gates']=policy['gates'];template['physics']['acceptance_thresholds']=policy['acceptance']
         template['physics']['control_dt_s']=policy['control_dt_s']

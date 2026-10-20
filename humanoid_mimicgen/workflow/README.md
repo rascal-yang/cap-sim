@@ -154,3 +154,29 @@ Requests/Responses采用[官方结构化输出格式](https://developers.openai.
 评审后另修正交接周期重复更新速度、起点已到达时无行走参考、长交接时域截断，并增加实际步态参考记录。36 项 workflow 测试通过；无物理步的真实适配器检查覆盖无行走参考及 0.6/5 秒交接。上述评审后边界修正尚未再次物理运行；保存的成功实验绑定其当时源码快照。
 
 后续 `navigation.standing_orientation="upright"` 可选择世界直立根部参考，保留实测XYZ/yaw和源腿参考。20261020_1539_workflow_native 单次首次抓取成功：交接后一秒pitch从旧版8.90降至5.68度；目标XY误差3.58→5.37cm，未改善；总14.02秒，无监测障碍接触。最新37项workflow测试通过；评审后正常交接修正已进入这次实际运行。完整结果见 `experiments/20261020_1539_workflow_upright_stop/REPORT.md`。仍为实验选项，尚未与新恢复功能联合测试。
+
+## 确定性站位纠偏与批量入口（2026-10-20）
+
+新增 `parking.py`、`batch.py`。运行期不依赖 GPT：批处理仅接受 `decision.mode="deterministic"`，每例冻结输入、源码、模型与控制合同，执行后保存反思，再进入下一例。每例新建控制器，不跨例保留隐状态。修改输入或源码会阻断后续执行。默认不渲染；需要时 manifest 设置 `render: true`。失败保留记录，不自动重跑。
+
+在仓库目录执行本次最终三起点配置：
+
+```bash
+scripts/humano_python.sh -m humanoid_mimicgen.workflow batch \
+  --manifest ../experiments/20261020_1710_workflow_parking_final/manifest.json
+```
+
+manifest 格式：`{"experiment_root":"../experiments","max_cases":3,"render":false,"cases":[{"id":"baseline","request":"baseline/request.json"}, ...]}`。request 路径相对 manifest；request 内文件路径相对 request 文件。输出新的分钟级 batch 目录，包含 `summary.json`、`results.csv`、逐例 plan/prepare/execute、输入哈希和反思。冻结/规划/仿真/渲染分别计时；未测的时间为 null。当前为串行单进程批处理，不声称并行吞吐或模型会话缓存。
+
+`policy.navigation.correction` 提供：
+
+- `method: "walk"`：停稳后按当前几何重新规划小步移动；受共同导航预算及 `max_duration_s` 限制。本轮单例误差没有改善，保留作实验选项。
+- `method: "planted_feet"`：根据实测双脚位姿生成新的腿部 IK 参考，再通过 SONIC encoder1 执行。从实测关节开始混合，检查插值路径的脚位姿误差、障碍碰撞和目标静态 COM 支撑范围；不写入实时 qpos，不直接驱动 IK。
+- `residual_feedback: true`：下一次参考位置加上实测残差，评价目标始终不变。不能跳过支撑/几何检查。
+- 本次显式配置 `tolerance_m=.03, max_corrections=2, minimum_progress_m=.003, max_duration_s=4`。这些是预算和精度配置，非场景专属偏置，也不是通用最优值。优化无进展、不可行或预算结束后继续原抓取流程，不增加抓取前精度否决门。
+
+`navigation.parking` 是独立的预测停车实验选项。先用 `calibrate-stop --experiments <历史实测目录...> --output <新文件>` 拟合停止位移与速度的响应，再显式提供 `evidence_file`、`mode="predicted_stop"`、`trigger_radius_m`、`minimum_samples`、`max_residual_m`。校验场景/物理/源轨迹/SONIC 三模型哈希、证据哈希、不同样本数和拟合残差。本轮单样本残差4.22cm，早期两例碰撞失败；最终质量检查会拒绝该不足标定，最终三例未启用预测停车。
+
+最终评审后版本：三个出发位置误差分别 5.37→3.31、6.61→2.05、6.47→2.90 cm，任务成功2/3，整个批次不含渲染86.42秒。原起点抬升失去接触，恢复后接近不可达。较早中间版本3/3不能当作最终版本成功率。完整证据见 `../experiments/20261020_1710_workflow_parking_final/REPORT.md`（相对仓库目录）。48项 workflow、135项历史 MimicGen、71项仓库测试通过；另有真实适配器零物理步检查覆盖混合起点与时长预算。
+
+稳定判断改用有界时间窗口，保留完整观测日志；10000次窗口选择微基准从1.684秒降至0.00218秒，仅代表该局部操作。全流程耗时仍以实测 batch 记录为准。源动作可见，抓取仍属于轨迹重定向；脚接触与参考几何约束不构成动态可行性保证。默认流程不变，新增选项尚未证明提升总体抓取成功率，训练视频尚未完成完整时序验收。

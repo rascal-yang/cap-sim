@@ -27,11 +27,19 @@ def main(argv=None):
         if name=='prepare':cmd.add_argument('--strategy-id',required=True)
     for name in ('execute','inspect','verify'):
         cmd=sub.add_parser(name);cmd.add_argument('--experiment',required=True)
+    cmd=sub.add_parser('calibrate-stop');cmd.add_argument('--experiments',nargs='+',required=True);cmd.add_argument('--output',required=True)
+    cmd=sub.add_parser('batch');cmd.add_argument('--manifest',required=True)
     args=p.parse_args(argv)
     try:
         with diagnostics_to_stderr():
             from . import service
-            if args.command in ('plan','prepare','resolve'):
+            if args.command=='calibrate-stop':
+                from .parking import calibrate_stopping
+                result=calibrate_stopping(args.experiments,args.output)
+            elif args.command=='batch':
+                from .batch import run_batch
+                result=run_batch(args.manifest)
+            elif args.command in ('plan','prepare','resolve'):
                 path=Path(args.request).resolve();request=json.loads(path.read_text());base=path.parent
                 def paths(r):
                     r['files']={k:str((base/v).resolve()) for k,v in r['files'].items()}

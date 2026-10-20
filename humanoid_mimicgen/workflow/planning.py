@@ -124,3 +124,16 @@ def measured_posture_retreat(model,q,normal,policy):
     audit={'path':info,'target_upper_joint_rad':target[addresses].tolist(),'upper_qpos_addresses':addresses.tolist(),
            'normal_source':'first measured stable stance','root_frame':'measured at recovery planning','ik_group':None}
     return reference_from_path(model,planner,path,policy,audit,policy['recovery']['retreat_timeout_s']-policy['settle']['continuous_s'])
+
+
+def measured_navigation_path(model,q,goal,policy):
+    """Check a new base route using measured upper body; never edit live data."""
+    from ..stationary_planning import StationaryPlanner
+    from ..stance_selection import yaw_of,yaw_quat
+    from ..reachability_navigation import plan_base_path
+    planner=StationaryPlanner(model,penetration_tolerance_m=policy['planning']['penetration_tolerance_m'])
+    def valid(pose):
+        probe=q.copy();probe[:2]=pose[:2];probe[3:7]=yaw_quat(pose[2])
+        return not planner.collisions(probe)
+    path,audit=plan_base_path(np.r_[q[:2],yaw_of(q[3:7])],goal,valid,**policy['planning']['base_path'])
+    return path,audit
