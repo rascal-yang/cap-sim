@@ -62,9 +62,24 @@ class NativeAdapter:
                 raise WorkflowError('invalid_input','Support, ground and bilateral feet required')
             class Mode1Sonic(StandingSonic):
                 navigating=True
+                handoff_until_tick=-1
                 def plan_legs(inner,data,velocity,height,facing_yaw=None):
-                    if inner.navigating:Sonic.plan_legs(inner,data,velocity,height,facing_yaw)
-                    else:super().plan_legs(data,velocity,height,facing_yaw)
+                    if inner.navigating:
+                        Sonic.plan_legs(inner,data,velocity,height,facing_yaw)
+                        speed=float(np.linalg.norm(velocity))
+                        inner.planner_records.append({'time':float(data.time),'type':'live_locomotion','planner_mode':1 if speed>1e-6 else 4,'encoder_mode':1,'velocity_world_xy_m_s':np.asarray(velocity).tolist(),'target_vel':speed if speed>1e-6 else -1,'reference':inner.ref.tolist()})
+                    elif inner.tick>=inner.handoff_until_tick:super().plan_legs(data,velocity,height,facing_yaw)
+                def blend_to_standing(inner,anchor,duration):
+                    from .motion import blend_stance_reference
+                    # SONIC reference frames are 30 Hz, independent of physics.
+                    count=max(100,int(np.ceil(duration*30))+31)
+                    if inner.ref is None:
+                        future=np.repeat(np.r_[self.d.qpos[:7],self.d.qpos[inner.qids]][None],count,axis=0)
+                    else:future=inner.sample((inner.tick-inner.ref_tick)*.6+np.arange(count))
+                    inner.anchor=anchor.copy();inner.navigating=False
+                    inner.ref=blend_stance_reference(future,anchor,np.arange(count)/30.,duration)
+                    inner.ref_tick=inner.tick;inner.handoff_until_tick=inner.tick+int(np.ceil(duration/.02))
+                    inner.planner_records.append({'time':float(self.d.time),'type':'blended_standing_reference','duration_s':duration,'reference':inner.ref.tolist()})
             self.model_files=sonic_files(task)
             self.sonic=Mode1Sonic(self.m,self.b.robot,task['resources']['sonic_models'],self.b.initial,case='anchored_legs')
             self.providers={k:getattr(self.sonic,k).get_providers() for k in ('encoder','decoder','planner')}

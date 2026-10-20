@@ -142,3 +142,15 @@ Requests/Responses采用[官方结构化输出格式](https://developers.openai.
 `experiments/20261019_2110_workflow_start_sweep`（相对仓库上级目录）：6个预声明初始XY位置，朝向和所有控制参数保持不变，每个位置一次。导航/停稳/闭环抓取进入6/6，首次及最终成功均3/6；成功耗时12.92–14.44模拟秒，均值13.67秒。恢复未增加成功例数，暴露了恢复张手碰桌、瞬时支撑门和回撤规划失败，不能宣称已有鲁棒恢复能力。停稳后9.36cm误差的例子仍成功，2.13cm误差的例子失败，不能仅从导航XY误差推断抓取可行性。完整结果、冻结证据、逐例反思和MP4均保留。
 
 可选files.study_case可提供与默认purpose相同字段的研究目的记录，仅覆盖冻结合同的实验描述，不覆盖策略、控制或物理参数；该文件随输入绑定哈希。
+
+## 平滑导航与正常上半身恢复（实验选项）
+
+独立模块 `workflow/motion.py` 提供 `DistanceVelocityProfile`。每个控制周期根据当前目标位移和实测闭合速度计算速度包络，再限制速度向量变化；它限制的是命令加速度，不能保证 SONIC 的实际加速度。通过 `policy.navigation.profile="distance_velocity"` 启用，必须显式提供 `acceleration_m_s2`、`response_s`，最大速度沿用 `speed_m_s`。当前试验为 0.5 m/s、0.5 m/s²、0.6 s，属于待标定配置，不能解释成机器人通用能力。到达原 stop_radius 后将行走未来参考用五次权重逐渐过渡到站立参考，仍使用 encoder mode1；随后沿用原有实测底座稳定条件。SONIC 在线步态 planner 的模式与 encoder 模式是不同字段，分别记录。
+
+`policy.recovery.posture_restore=true` 启用正常姿态恢复：保存第一次停稳后的手臂、腰部关节姿态；每次撤回从当前实测状态规划，到当前根部坐标系下的该上半身姿态。根部、腿、手指、物体在规划中保持当前状态；执行仍是 SONIC Cartesian mode1，不把参考关节写进仿真。必须显式设置 `joint_tolerance_rad`、`position_tolerance_m`、`angle_tolerance_rad`，参考结束后实测连续收敛才重新接近；没有添加抓取前末端误差门。接触阶段积分纠偏保留，恢复阶段不叠加旧积分偏置。
+
+结果：`experiments/20261020_1519_workflow_blended_stop/REPORT.md`（仓库上级目录）。最新实际抓取例 `20261020_1521_workflow_native` 成功，但交接后前倾/额外位移没有改善；因此新导航不作为已验证的优选默认。独立恢复例 `20261020_1515_workflow_native` 两次完成正常姿态恢复，三次抓取仍失败。两选项本轮未联合物理测试，不能合并两项局部结果宣称联合成功。
+
+评审后另修正交接周期重复更新速度、起点已到达时无行走参考、长交接时域截断，并增加实际步态参考记录。36 项 workflow 测试通过；无物理步的真实适配器检查覆盖无行走参考及 0.6/5 秒交接。上述评审后边界修正尚未再次物理运行；保存的成功实验绑定其当时源码快照。
+
+后续 `navigation.standing_orientation="upright"` 可选择世界直立根部参考，保留实测XYZ/yaw和源腿参考。20261020_1539_workflow_native 单次首次抓取成功：交接后一秒pitch从旧版8.90降至5.68度；目标XY误差3.58→5.37cm，未改善；总14.02秒，无监测障碍接触。最新37项workflow测试通过；评审后正常交接修正已进入这次实际运行。完整结果见 `experiments/20261020_1539_workflow_upright_stop/REPORT.md`。仍为实验选项，尚未与新恢复功能联合测试。

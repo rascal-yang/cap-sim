@@ -70,6 +70,12 @@ def measured_approach(model,q,goals,policy):
     if not solved['success']:raise WorkflowError('unreachable','Measured stance IK failed')
     path,info=planner.connect(q,solved['qpos'],solved['joint_ids'],**opts['rrt'])
     if path is None:raise WorkflowError('planning_budget_exhausted','Measured stance connection failed')
+    return reference_from_path(model,planner,path,policy,{'ik_group':solved['group'],'path':info},policy['budgets']['approach_s'])
+
+
+def reference_from_path(model,planner,path,policy,audit,budget):
+    from ..planned_approach import timed_joint_reference
+    from cap_sim.backends.native_sonic import rot
     limits=policy['approach']
     times,points=timed_joint_reference(path,joint_speed=limits['joint_speed_rad_s'],minimum_duration=limits.get('minimum_duration_s',policy['control_dt_s']),dt=policy['control_dt_s'])
     poses={hand:[] for hand in ('left','right','torso')}
@@ -85,8 +91,8 @@ def measured_approach(model,q,goals,policy):
         angle=(rot(poses[side][1:,3:])*rot(poses[side][:-1,3:]).inv()).magnitude()
         factor=max(factor,float(np.max(angle/np.diff(times)))/limits['wrist_speed_rad_s'])
     times*=factor
-    if times[-1]>policy['budgets']['approach_s']:raise WorkflowError('planning_budget_exhausted','Approach duration')
-    return times,poses,{'ik_group':solved['group'],'path':info,'duration_s':float(times[-1]),'physics_steps':0,'reference_only':True}
+    if times[-1]>budget:raise WorkflowError('planning_budget_exhausted','Approach duration')
+    return times,poses,dict(audit,duration_s=float(times[-1]),physics_steps=0,reference_only=True)
 
 
 def nominal_stance(source_root,source_object,target_object):
@@ -100,3 +106,21 @@ def measured_retreat(model,q,measured_start_poses,policy):
     """Plan physical retreat from current q; torso is an output, not an IK hand."""
     goals={h:measured_start_poses[h].copy() for h in ('left','right')}
     return measured_approach(model,q,goals,policy)
+
+
+def measured_posture_retreat(model,q,normal,policy):
+    """Restore known arm AND waist posture through a collision-checked path.
+
+    Targets are FK in the current root frame, executed by SONIC mode1, never a
+    direct joint write. Measured convergence remains a separate runtime check.
+    """
+    from ..stationary_planning import StationaryPlanner
+    from .motion import recovery_configuration
+    opts=policy['planning'];planner=StationaryPlanner(model,penetration_tolerance_m=opts['penetration_tolerance_m'])
+    joints=planner.arms+planner.torso;addresses=model.jnt_qposadr[joints]
+    target=recovery_configuration(q,normal,addresses)
+    path,info=planner.connect(q,target,joints,**opts['rrt'])
+    if path is None:raise WorkflowError('planning_budget_exhausted','Normal posture connection failed')
+    audit={'path':info,'target_upper_joint_rad':target[addresses].tolist(),'upper_qpos_addresses':addresses.tolist(),
+           'normal_source':'first measured stable stance','root_frame':'measured at recovery planning','ik_group':None}
+    return reference_from_path(model,planner,path,policy,audit,policy['recovery']['retreat_timeout_s']-policy['settle']['continuous_s'])

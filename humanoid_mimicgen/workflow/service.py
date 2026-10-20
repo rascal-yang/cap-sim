@@ -209,6 +209,12 @@ def prepare(strategy_id,request):
             'settings_and_origins':policy}
         template['control']['postapproach_pose_gate_enabled']=False
         template['control']['recovery_interfaces']={'open':'SONIC mode1 measured wrist hold + source open finger command','retreat':'SONIC mode1 IK/RRT reference from actual state','retry':'measured object retargeting, base settle, source command restart; controller and physical state continuous'}
+        if policy['navigation'].get('profile')=='distance_velocity':
+            template['control']['stage_interfaces'][0]['fields']+='; distance-driven acceleration-limited velocity; C2 blend of walking leg/root orientation references to standing at arrival; measured stability required before approach'
+        if policy['navigation'].get('standing_orientation')=='upright':
+            template['control']['stage_interfaces'][1]['fields']='source entry legs, world-up roll/pitch, measured root XYZ/yaw; physically measured support/motion gate'
+        if policy.get('recovery',{}).get('posture_restore',False):
+            template['control']['recovery_interfaces']['retreat']='SONIC mode1 FK of collision-checked arms+waist joint path to first stable normal posture in current root frame; measured joint/wrist/torso convergence before retry'
         template['budget']={'attempts_per_case':1,'recovery_attempts':policy.get('recovery',{}).get('max_retries',0),'simulation_seconds_per_attempt':policy['budgets']['simulation_s'],'stage_budgets':policy['budgets']}
         template['physics']['safety_gates']=policy['gates'];template['physics']['acceptance_thresholds']=policy['acceptance']
         template['physics']['control_dt_s']=policy['control_dt_s']

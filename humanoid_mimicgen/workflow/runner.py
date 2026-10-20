@@ -6,7 +6,7 @@ import numpy as np
 from .contracts import WorkflowError, canonical, now, phase_at
 from .execution import GateMonitor, base_is_stable, finite_record
 from .native import NativeAdapter, validate_physics, validate_model_identity
-from .planning import measured_approach, measured_retreat, navigate_command, validate_source
+from .planning import measured_approach, measured_retreat, measured_posture_retreat, navigate_command, validate_source
 from .calibration import equilibrium_command
 from .feedback import IntegralFeedback,can_recover
 
@@ -30,6 +30,10 @@ def execute_native(contract):
     recovery=policy.get('recovery',{'max_retries':0});base_targets={k:v.copy() for k,v in targets.items()}
     comp=policy['compensation'];feedback=IntegralFeedback(bindings['hands'],gain_per_s=comp['gain_per_s'],cap_m=comp['cap_m']) if comp['mode']=='bounded_integral' else None
     contact_started=None;feedback_log=[];goalposes=None
+    from .motion import DistanceVelocityProfile, upright_root_reference
+    nav=policy['navigation'];smooth=nav.get('profile')=='distance_velocity'
+    velocity_profile=DistanceVelocityProfile(speed=nav['speed_m_s'],acceleration=nav['acceleration_m_s2'],response_s=nav['response_s']) if smooth else None
+    nav_velocity=np.zeros(2);nav_quiet_s=0.;normal_q=None;recovery_settled=0.;posture_audit=None
     def write(name,value):(out/name).write_bytes(canonical(finite_record(value)))
     def begin_recovery(reason,ob):
         nonlocal retry_index,stage,stage_started,holdposes,gate,phase_id,force_tick,failure
@@ -58,16 +62,33 @@ def execute_native(contract):
         object_anchor=np.asarray(adapter.observe()['object_pose']);write('initial_observation.json',adapter.observe())
         maxsteps=int(policy['budgets']['simulation_s']/dt)
         while steps<maxsteps:
-            tick=steps%stride==0 or force_tick;force_tick=False;velocity=np.zeros(2);face=float(goal[2]);source_index=-1
+            tick=steps%stride==0 or force_tick;force_tick=False;profile_updated=False;velocity=np.zeros(2);face=float(goal[2]);source_index=-1
             if stage=='navigation':
                 velocity,face,arrived,waypoint=navigate_command([*d.qpos[:2],rot(d.qpos[3:7]).as_euler('xyz')[2]],route,waypoint,policy['navigation'])
+                if smooth:
+                    if tick:
+                        profile_updated=True
+                        nav_velocity=velocity_profile.step(route[waypoint,:2]-d.qpos[:2],policy['control_dt_s'],measured_velocity=d.qvel[:2])
+                        slow=np.linalg.norm(d.qvel[:2])<=policy['settle']['speed_m_s'] and abs(d.qvel[5])<=policy['settle']['yaw_speed_rad_s']
+                        quiet=arrived and slow and np.linalg.norm(nav_velocity)<=policy['settle']['speed_m_s']
+                        nav_quiet_s=nav_quiet_s+policy['control_dt_s'] if quiet else 0.
+                    velocity=nav_velocity.copy()
+                    # Enter blended standing on geometric arrival; walking at tiny
+                    # speeds does not itself guarantee a stable idle gait.
                 if arrived and tick:
+                    prehandoff_velocity=velocity.copy()
                     adapter.sonic.navigating=False
                     adapter.sonic.anchor=np.r_[d.qpos[:7],source[entry,1+adapter.b.qids]].copy()
-                    adapter.sonic.anchor[:7]=standing_root_reference(d.qpos[:7],source[entry,1:8]);adapter.sonic.ref=None
+                    adapter.sonic.anchor[:7]=standing_root_reference(d.qpos[:7],source[entry,1:8])
+                    if nav.get('standing_orientation')=='upright':adapter.sonic.anchor[:7]=upright_root_reference(d.qpos[:7])
+                    if smooth:adapter.sonic.blend_to_standing(adapter.sonic.anchor,nav['response_s'])
+                    else:adapter.sonic.ref=None
                     holdposes=adapter.poses();stage='settle';stage_started=float(d.time);velocity[:]=0
-                    events.append({'event':'navigation_stop_requested','time_s':float(d.time),'actual_root':d.qpos[:7].tolist(),'goal_xyyaw':goal.tolist()})
+                    events.append({'event':'navigation_stop_requested','time_s':float(d.time),'actual_root':d.qpos[:7].tolist(),'goal_xyyaw':goal.tolist(),'measured_velocity_xy_m_s':d.qvel[:2].tolist(),'command_velocity_xy_m_s':prehandoff_velocity.tolist(),'quiet_duration_s':nav_quiet_s})
                 elif d.time>=policy['budgets']['navigation_s']:raise WorkflowError('navigation_timeout')
+            if smooth and stage!='navigation':
+                if tick and not profile_updated:nav_velocity=velocity_profile.step([0.,0.],policy['control_dt_s'])
+                velocity=nav_velocity.copy()
             contact_stage=stage=='contact'
             phase=phase_at(phases,frame) if contact_stage else None
             if contact_stage:
@@ -106,7 +127,7 @@ def execute_native(contract):
                 tracking.append(row)
             fingers=targets['fingers'][frame if contact_stage else entry]
             adapter.command(goalposes,velocity,face,float(source[entry,3]),fingers,policy_tick=tick)
-            attempted.append({'time_s':float(d.time),'stage':label,'source_index':source_index,'retry_index':retry_index,'mode':1,'fingers_rad':fingers.tolist(),'body_target_rad':adapter.last_target.tolist(),'ctrl_Nm':d.ctrl.tolist()})
+            attempted.append({'time_s':float(d.time),'stage':label,'source_index':source_index,'retry_index':retry_index,'mode':1,'velocity_world_xy_m_s':velocity.tolist(),'locomotion_planner_active':bool(adapter.sonic.navigating),'fingers_rad':fingers.tolist(),'body_target_rad':adapter.last_target.tolist(),'ctrl_Nm':d.ctrl.tolist()})
             adapter.step();steps+=1;ob=adapter.observe();ob.update(stage=label,source_poststep_frame=source_index,retry_index=retry_index)
             states.append(np.r_[d.time,d.qpos,d.qvel,d.ctrl]);observations.append(ob);commands.append(attempted[-1])
             limits=policy['gates'];contacts=ob['contacts'];failure=gate.update(dt,hand_force=contacts['hand_object_N'],obstacle_force=contacts['robot_obstacle_N'],requires_contact=bool(phase and phase['requires_contact']))
@@ -130,7 +151,9 @@ def execute_native(contract):
                 ob.update(stable_sample=stable,continuous_stable_s=settled)
                 if elapsed>=policy['settle']['minimum_s'] and steps%stride==0 and settled+1e-12>=policy['settle']['continuous_s']:
                     actual=adapter.poses()
-                    if retreat_goals is None:retreat_goals={h:p.copy() for h,p in actual.items()}
+                    if retreat_goals is None:
+                        retreat_goals={h:p.copy() for h,p in actual.items()};normal_q=d.qpos.copy()
+                        np.save(out/'normal_posture_qpos.npy',normal_q)
                     goals={s:(targets[s+'_pose'][entry] if s in bindings['hands'] else actual[s]) for s in ('left','right')}
                     pstart=time.monotonic();plan_times,plan_poses,pa=measured_approach(m,d.qpos.copy(),goals,policy);online_planning_s+=time.monotonic()-pstart
                     write('planning_audit_'+str(retry_index)+'.json',dict(pa,planning_wall_s=online_planning_s));np.savez_compressed(out/('planned_approach_'+str(retry_index)+'.npz'),time_s=plan_times,**{k+'_pose':v for k,v in plan_poses.items()})
@@ -153,7 +176,12 @@ def execute_native(contract):
                 elapsed=float(d.time)-stage_started
                 if contacts['support_N']<=policy['acceptance']['support_force_N']:raise WorkflowError('recovery_support_lost')
                 if elapsed>=recovery['release_min_s'] and contacts['hand_object_N']<=limits['contact_force_N'] and steps%stride==0:
-                    plan_times,plan_poses,pa=measured_retreat(m,d.qpos.copy(),retreat_goals,policy)
+                    pstart=time.monotonic()
+                    if recovery.get('posture_restore',False):
+                        plan_times,plan_poses,pa=measured_posture_retreat(m,d.qpos.copy(),normal_q,policy)
+                    else:plan_times,plan_poses,pa=measured_retreat(m,d.qpos.copy(),retreat_goals,policy)
+                    online_planning_s+=time.monotonic()-pstart;posture_audit=pa;recovery_settled=0.
+                    np.savez_compressed(out/('planned_retreat_'+str(retry_index)+'.npz'),time_s=plan_times,**{k+'_pose':v for k,v in plan_poses.items()})
                     write('retreat_plan_'+str(retry_index)+'.json',pa)
                     stage='recovery_retreat';stage_started=float(d.time)
                     events.append({'event':'retreat_started','retry_index':retry_index,'time_s':float(d.time)})
@@ -161,7 +189,17 @@ def execute_native(contract):
             elif stage=='recovery_retreat':
                 elapsed=float(d.time)-stage_started
                 if contacts['support_N']<=policy['acceptance']['support_force_N']:raise WorkflowError('recovery_support_lost')
-                if elapsed>=plan_times[-1] and steps%stride==0:
+                restored=True
+                if recovery.get('posture_restore',False):
+                    actual=adapter.poses();addresses=np.asarray(posture_audit['upper_qpos_addresses'],int)
+                    errors={'upper_joint_max_rad':float(np.max(np.abs(d.qpos[addresses]-normal_q[addresses]))),
+                            'wrist_max_m':max(float(np.linalg.norm(actual[h][:3]-plan_poses[h][-1,:3])) for h in ('left','right')),
+                            'pose_max_rad':max(float((rot(plan_poses[h][-1,3:]).inv()*rot(actual[h][3:])).magnitude()) for h in ('left','right','torso'))}
+                    restored=errors['upper_joint_max_rad']<=recovery['joint_tolerance_rad'] and errors['wrist_max_m']<=recovery['position_tolerance_m'] and errors['pose_max_rad']<=recovery['angle_tolerance_rad']
+                    recovery_settled=recovery_settled+dt if restored and elapsed>=plan_times[-1] else 0.
+                    ob['recovery_posture_errors']=errors;ob['recovery_converged_s']=recovery_settled
+                    restored=recovery_settled+1e-12>=policy['settle']['continuous_s']
+                if elapsed>=plan_times[-1] and restored and steps%stride==0:
                     from ..skill_planning import adapt_poses
                     current_object=np.asarray(ob['object_pose'])
                     for hand in bindings['hands']:targets[hand+'_pose']=adapt_poses(base_targets[hand+'_pose'],object_anchor,current_object)

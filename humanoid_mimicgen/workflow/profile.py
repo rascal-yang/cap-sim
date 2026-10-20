@@ -27,8 +27,15 @@ def validate_policy(p):
         if p['compensation']['mode']=='bounded_integral':
             for key in ('gain_per_s','cap_m'):positive(p['compensation'][key],key)
             if not p['compensation'].get('evidence_file'):raise WorkflowError('invalid_input','Feedback requires bound evidence')
+        nav=p['navigation']
+        if nav.get('standing_orientation') not in (None,'source','upright'):raise WorkflowError('invalid_input','Standing orientation')
+        if nav.get('profile') not in (None,'distance_velocity'):raise WorkflowError('invalid_input','Navigation profile')
+        if nav.get('profile')=='distance_velocity':
+            for key in ('acceleration_m_s2','response_s'):positive(nav[key],key)
         recovery=p.get('recovery',{'max_retries':0})
         if type(recovery['max_retries']) is not int or recovery['max_retries']<0:raise WorkflowError('invalid_input','Recovery budget')
+        if recovery.get('posture_restore',False):
+            for key in ('joint_tolerance_rad','position_tolerance_m','angle_tolerance_rad'):positive(recovery[key],key)
         if recovery['max_retries']:
             for key in ('release_min_s','release_timeout_s','retreat_timeout_s'):positive(recovery[key],key)
             if recovery['release_min_s']>recovery['release_timeout_s']:raise WorkflowError('invalid_input','Recovery timing')
