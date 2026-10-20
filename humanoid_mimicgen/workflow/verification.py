@@ -39,6 +39,39 @@ def verify(experiment):
         indices=[x['source_index'] for x in group]
         expected=list(range(s['phases'][0]['start'],s['phases'][0]['start']+len(group)))
         if indices!=expected or any(not 0<=x['source_index']<len(targets['fingers']) or not np.array_equal(x['fingers_rad'],targets['fingers'][x['source_index']]) for x in group):errors.append('source_command_mismatch')
+    if policy.get('grasp_trigger'):
+        from .grasp_trigger import validate_judgment,validate_approval,trigger_targets
+        from .contracts import digest
+        decisions=sorted((out/'grasp_decisions').glob('*/provenance.json'))
+        if len(decisions)!=a.get('api_calls_during_execution'):errors.append('grasp_judgment_count_mismatch')
+        for path in decisions:
+            proof=json.loads(path.read_text());folder=path.parent;evidence=json.loads((folder/'evidence.json').read_text())
+            if proof['evidence_sha256']!=digest(evidence):errors.append('grasp_judgment_evidence_mismatch')
+            if proof['status']=='completed':
+                try:validate_judgment(json.loads((folder/'response.json').read_text()),evidence)
+                except WorkflowError:errors.append('invalid_grasp_judgment')
+        if len(decisions)>policy['grasp_trigger']['max_calls']:errors.append('grasp_judgment_budget_exceeded')
+        events=json.loads((out/'events.json').read_text());tracking=json.loads((out/'tracking.json').read_text())
+        for retry,group in enumerate(groups):
+            if not group:continue
+            try:
+                event=next(e for e in events if e['event']=='contact_started' and e['retry_index']==retry)
+                decision_event=next(e for e in events if e['event']=='grasp_judgment' and e['retry_index']==retry and e['time_s']==event['time_s'])
+                folder=out/'grasp_decisions'/str(decision_event['query_index'])
+                proof=json.loads((folder/'provenance.json').read_text());response=json.loads((folder/'response.json').read_text());evidence=json.loads((folder/'evidence.json').read_text())
+                validate_approval(proof,response,evidence,event,policy['grasp_trigger']['model'])
+                if response!=decision_event['decision'] or group[0]['time_s']!=event['time_s']:raise ValueError('Decision execution time mismatch')
+                prior=dict(np.load(out/('gpt_pretrigger_targets_'+str(retry)+'.npz')));actual={k:np.asarray(v) for k,v in event['wrist_hold'].items()}
+                for hand in s['bindings']['hands']:
+                    if not np.array_equal(actual[hand],evidence['measured'][hand+'_pose']):raise ValueError('Hold pose differs from judgment')
+                expected=trigger_targets(prior,actual,s['bindings']['hands'],start=s['phases'][0]['start'],lift=s['phases'][0]['end'],end=s['phases'][-1]['end'],offset=s['command_pose_offset'])
+                saved=dict(np.load(out/('gpt_trigger_targets_'+str(retry)+'.npz')))
+                if any(not np.array_equal(v,saved[k]) for k,v in expected.items()):raise ValueError('Grasp target artifact mismatch')
+                for row in tracking:
+                    if row['retry_index']==retry and row['source_index']>=0:
+                        for hand in s['bindings']['hands']:
+                            if not np.array_equal(row[hand]['target_pose'],saved[hand+'_pose'][row['source_index']+s['command_pose_offset']]):raise ValueError('Executed grasp target mismatch')
+            except (WorkflowError,KeyError,ValueError,StopIteration,OSError):errors.append('unapproved_or_mismatched_grasp_execution')
     indices=[x['source_index'] for x in groups[-1]]
     if a['completed'] and (not indices or indices[-1]!=s['phases'][-1]['end']-1):errors.append('truncated_completion')
     # A null measurement is unknown, never evidence of successful contact.
@@ -69,7 +102,7 @@ def verify(experiment):
     finally:b.close()
     result={'schema_version':1,'experiment_id':root.name,'strategy_id':c['workflow']['strategy_id'],'status':'completed' if physical else 'failed',
         'stage':a['stage'],'reason_code':a['failure'] or (None if physical else 'verification_failed'),'physical_task_completed':physical,
-        'native':native,'recovery_count':retry_count,'source_commands_per_attempt':[len(g) for g in groups],'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'],
+        'native':native,'recovery_count':retry_count,'source_commands_per_attempt':[len(g) for g in groups],'source_commands_verified':len(contact),'all_source_commands_completed':a['completed'] and not bool(policy.get('grasp_trigger')),'all_source_finger_commands_completed':a['completed'],'grasp_execution':'gpt_triggered_measured_wrist_hold_relative_lift' if policy.get('grasp_trigger') else 'demonstration_retargeting',
         'verification_errors':errors,'hold_continuous_s':longest,'hold_valid_s':len(valid)*dt,'hold_total_s':len(held)*dt,'hold_min_clearance_m':min((x['clearance_m'] for x in held),default=None),
         'max_clearance_m':max((x['clearance_m'] for x in usable),default=None),'hold_root_drift_m':drift,
         'max_obstacle_force_N':max((x['contacts']['robot_obstacle_N'] for x in usable),default=None),

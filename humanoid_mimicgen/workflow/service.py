@@ -63,6 +63,13 @@ def _strategy(request):
         record=json.loads(Path(request['files']['record']).read_text())
         scope=response_scope(s,s['context']['model'],s['context']['reference_states'],file_hash(record['physics']['physics_parameters_manifest']),sonic_files(json.loads(Path(request['files']['task']).read_text())))
         park['model']=validate_calibration(json.loads(Path(request['files'][name]).read_text()),scope,park)
+    if 'grasp_trigger' in s['policy']:
+        trigger=s['policy']['grasp_trigger'];name=trigger['preflight_evidence_file']
+        if name not in request['files'] or request['files'].get('grasp_judge_executable')!=trigger['executable']:raise WorkflowError('preflight_failed','Grasp judge inputs not bound')
+        proof=json.loads(Path(request['files'][name]).read_text())
+        if proof.get('status')!='completed' or proof.get('model_requested')!=trigger['model'] or proof.get('executable_sha256')!=file_hash(trigger['executable']):raise WorkflowError('preflight_failed','Grasp judge identity mismatch')
+        for path,expected in proof['evidence_sha256'].items():
+            if file_hash(path)!=expected:raise WorkflowError('preflight_failed','Grasp judge connectivity evidence changed')
     validate_strategy(s);validate_policy(s['policy'])
     return s
 
@@ -225,6 +232,8 @@ def prepare(strategy_id,request):
             template['control']['recovery_interfaces']['retreat']='SONIC mode1 FK of collision-checked arms+waist joint path to first stable normal posture in current root frame; measured joint/wrist/torso convergence before retry'
         if 'parking' in policy['navigation'] or 'correction' in policy['navigation']:
             template['control']['parking']='Declared measured stopping predictor and bounded post-settle correction; walk uses checked route; planted_feet uses newly planned leg IK with measured world foot holds and COM support screening, executed only through SONIC encoder1; no GPT or state reset'
+        if 'grasp_trigger' in policy:
+            template['control']['grasp_trigger']={'policy':policy['grasp_trigger'],'observations':'privileged object/wrist/digit geometry, contacts, base stability; source reference geometry','actions':['continue','close_now','abort'],'execution':'Open fingers during approach/probe. On GPT close_now replace grasp wrist motion by measured hold, replay finger closure, then adapted relative lift. Retain integral feedback and physical gates. Model wait pauses physics; logged separately. No physical reset.'}
         template['budget']={'attempts_per_case':1,'recovery_attempts':policy.get('recovery',{}).get('max_retries',0),'simulation_seconds_per_attempt':policy['budgets']['simulation_s'],'stage_budgets':policy['budgets']}
         template['physics']['safety_gates']=policy['gates'];template['physics']['acceptance_thresholds']=policy['acceptance']
         template['physics']['control_dt_s']=policy['control_dt_s']

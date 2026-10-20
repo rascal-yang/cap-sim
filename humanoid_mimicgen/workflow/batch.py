@@ -60,7 +60,7 @@ def run_batch(manifest_path):
     manifest=copy.deepcopy(m);manifest.update(started_at=started,source_manifest_sha256=file_hash(path),
         requests_sha256={c['id']:file_hash((path.parent/c['request']).resolve()) for c,_ in cases},
         input_files_sha256={c['id']:service.input_context(r['files']) for c,r in cases},
-        implementation_sha256={k:file_hash(v) for k,v in service.implementation_files().items()},api_calls=0)
+        implementation_sha256={k:file_hash(v) for k,v in service.implementation_files().items()},planning_api_calls=0,runtime_model_decisions=any('grasp_trigger' in r['strategy']['policy'] for _,r in cases))
     service.write_new(root/'manifest.json',manifest);service.write_new(root/'manifest.sha256.json',{'sha256':file_hash(root/'manifest.json')})
     results=[]
     for case,request in cases:
@@ -82,8 +82,13 @@ def run_batch(manifest_path):
             row=summarize_run(experiment,value)
             if not (experiment/'reflection.json').is_file():raise WorkflowError('integrity_error','Missing execution reflection')
         except Exception as exc:
+            actual_calls=0
+            if experiment:
+                audit=experiment/'execution/execution_audit.json'
+                if audit.is_file():actual_calls=json.loads(audit.read_text()).get('api_calls_during_execution',0)
+                else:actual_calls=len(list((experiment/'execution/grasp_decisions').glob('*/provenance.json')))
             row={'status':'failed','success':False,'reason':exc.code if isinstance(exc,WorkflowError) else 'batch_case_error',
-                 'detail':str(exc),'experiment_path':str(experiment) if experiment else None,'api_calls':0}
+                 'detail':str(exc),'experiment_path':str(experiment) if experiment else None,'api_calls':actual_calls}
         row.update(case_id=case['id'],started_at=case_start,timing=timing)
         reflection={'case':case['id'],'experiment_path':row.get('experiment_path'),'recorded_at':now(),'result':row.copy(),
                     'next_action':'Continue next predeclared case with frozen policy; no GPT tuning','interpretation':'One measured case, not general reliability'}
@@ -104,5 +109,5 @@ def run_batch(manifest_path):
         writer=csv.DictWriter(stream,fieldnames=fields,extrasaction='ignore');writer.writeheader();writer.writerows(results)
     summary={'status':'completed','batch_path':str(root),'experiment_id':root.name,'started_at':started,'ended_at':now(),'total_wall_s':time.monotonic()-clock,
              'successes':sum(r['success'] for r in results),'case_count':len(results),'success_rate':sum(r['success'] for r in results)/len(results),
-             'api_calls':0,'render_requested':m.get('render',False),'rows':results}
+             'api_calls':sum((r.get('api_calls') or 0) for r in results),'render_requested':m.get('render',False),'rows':results}
     service.write_new(root/'summary.json',summary);return summary

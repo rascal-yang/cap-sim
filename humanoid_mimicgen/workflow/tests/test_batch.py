@@ -28,7 +28,7 @@ def test_summary_keeps_first_and_final_navigation_errors(tmp_path):
 def test_batch_blocks_changed_referenced_input_before_prepare(tmp_path,monkeypatch):
     from humanoid_mimicgen.workflow import batch,service
     initial=tmp_path/'initial';initial.write_text('original')
-    request=tmp_path/'request.json';request.write_text(json.dumps({'decision':{'mode':'deterministic'},'files':{'initial':str(initial)},'strategy_root':str(tmp_path/'strategies'),'experiment_root':str(tmp_path)}))
+    request=tmp_path/'request.json';request.write_text(json.dumps({'decision':{'mode':'deterministic'},'strategy':{'policy':{}},'files':{'initial':str(initial)},'strategy_root':str(tmp_path/'strategies'),'experiment_root':str(tmp_path)}))
     manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps({'experiment_root':str(tmp_path),'max_cases':1,'cases':[{'id':'a','request':str(request)}]}))
     monkeypatch.setattr(service,'implementation_files',lambda:{})
     def mutate(r):
@@ -36,4 +36,21 @@ def test_batch_blocks_changed_referenced_input_before_prepare(tmp_path,monkeypat
     monkeypatch.setattr(service,'plan',mutate)
     monkeypatch.setattr(service,'prepare',lambda *a:pytest.fail('Changed input must block preparation'))
     result=batch.run_batch(manifest)
+    assert result['rows'][0]['reason']=='integrity_error' and not result['rows'][0]['success']
+
+
+def test_batch_preserves_calls_when_execute_raises_after_model_work(tmp_path,monkeypatch):
+    from humanoid_mimicgen.workflow import batch,service
+    request=tmp_path/'request.json';request.write_text(json.dumps({'decision':{'mode':'deterministic'},'strategy':{'policy':{}},'files':{},'strategy_root':str(tmp_path/'strategies'),'experiment_root':str(tmp_path)}))
+    manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps({'experiment_root':str(tmp_path),'max_cases':1,'cases':[{'id':'a','request':str(request)}]}))
+    experiment=tmp_path/'physical';(experiment/'execution').mkdir(parents=True)
+    monkeypatch.setattr(service,'implementation_files',lambda:{})
+    monkeypatch.setattr(service,'plan',lambda r:{'strategy_id':'test'})
+    monkeypatch.setattr(service,'prepare',lambda *args:{'experiment_path':str(experiment)})
+    def fail(path):
+        (path/'execution/execution_audit.json').write_text(json.dumps({'api_calls_during_execution':3}))
+        raise WorkflowError('integrity_error','post-execution verification failure')
+    monkeypatch.setattr(service,'execute',fail)
+    result=batch.run_batch(manifest)
+    assert result['api_calls']==3 and result['rows'][0]['api_calls']==3
     assert result['rows'][0]['reason']=='integrity_error' and not result['rows'][0]['success']

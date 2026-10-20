@@ -46,6 +46,12 @@ def validate_policy(p):
             if nav.get('profile')!='distance_velocity':raise WorkflowError('invalid_input','Correction requires smooth navigation')
             if type(corr['max_corrections']) is not int or corr['max_corrections']<0:raise WorkflowError('invalid_input','Correction count')
             for key in ('tolerance_m','minimum_progress_m','max_duration_s'):positive(corr[key],key)
+        if 'grasp_trigger' in p:
+            trigger=p['grasp_trigger']
+            if trigger['provider']!='codex_exec' or not trigger['model'].startswith('gpt-6'):raise WorkflowError('invalid_input','Explicit GPT-6 grasp provider required')
+            if type(trigger['max_calls']) is not int or trigger['max_calls']<1:raise WorkflowError('invalid_input','Grasp decision budget')
+            for key in ('interval_s','approach_lookahead_s','timeout_s'):positive(trigger[key],key)
+            if not trigger.get('executable') or not trigger.get('preflight_evidence_file'):raise WorkflowError('invalid_input','Grasp provider evidence required')
         recovery=p.get('recovery',{'max_retries':0})
         if type(recovery['max_retries']) is not int or recovery['max_retries']<0:raise WorkflowError('invalid_input','Recovery budget')
         if recovery.get('posture_restore',False):

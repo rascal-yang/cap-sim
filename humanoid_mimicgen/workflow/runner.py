@@ -37,6 +37,10 @@ def execute_native(contract):
     from .parking import RecentWindow,predicted_stop,correction_decision,planted_stance_reference,corrected_reference
     parking=nav.get('parking');correction=nav.get('correction');nav_cycle=0;nav_previous_error=None
     nav_elapsed=0.;nav_cycle_started=0.;parking_finished=False;nav_settle_pending=True;nav_log=[];stop_prediction=None;stance_shift_until=0.;parking_reference_xy=goal[:2].copy()
+    trigger=policy.get('grasp_trigger');judge=None;triggered_retries=[];last_query_elapsed=None;grasp_clock_started=0.;source_geometry=None
+    if trigger:
+        from .grasp_trigger import CodexGraspJudge,geometry,query_due,trigger_targets
+        judge=CodexGraspJudge(trigger)
     def write(name,value):(out/name).write_bytes(canonical(finite_record(value)))
     def begin_recovery(reason,ob):
         nonlocal retry_index,stage,stage_started,holdposes,gate,phase_id,force_tick,failure
@@ -64,6 +68,8 @@ def execute_native(contract):
         np.savez_compressed(out/'actual_initial.npz',qpos=d.qpos.copy(),qvel=d.qvel.copy(),ctrl=d.ctrl.copy(),qacc_warmstart=d.qacc_warmstart.copy())
         initial_pose=adapter.poses();initial_rot=rot(d.qpos[3:7]);rel={s:(initial_rot.inv().apply(p[:3]-d.qpos[:3]),initial_rot.inv()*rot(p[3:])) for s,p in initial_pose.items()}
         object_anchor=np.asarray(adapter.observe()['object_pose']);write('initial_observation.json',adapter.observe())
+        if trigger:
+            source_geometry=[{'source_frame':i,'geometry':geometry(adapter,source[i,1:1+m.nq],targets['fingers'][phases[0]['end']-1])} for i in (phases[0]['start'],(phases[0]['start']+phases[0]['end'])//2,phases[0]['end']-1)]
         maxsteps=int(policy['budgets']['simulation_s']/dt)
         while steps<maxsteps:
             tick=steps%stride==0 or force_tick;force_tick=False;profile_updated=False;velocity=np.zeros(2);face=float(goal[2]);source_index=-1
@@ -130,14 +136,17 @@ def execute_native(contract):
                 if stage=='navigation':
                     heading=rot(d.qpos[3:7]);goalposes={s:np.r_[d.qpos[:3]+heading.apply(pos),quat(heading*ori)] for s,(pos,ori) in rel.items()}
                 elif stage in ('settle','recovery_open'):goalposes={s:p.copy() for s,p in holdposes.items()}
+                elif stage=='grasp_probe':
+                    probe_frame=min(phases[0]['end']-1,phases[0]['start']+int((float(d.time)-stage_started)/dt))
+                    goalposes={s:targets[s+'_pose'][probe_frame+strategy['command_pose_offset']].copy() for s in ('left','right','torso')}
                 elif stage in ('approach','recovery_retreat'):goalposes={s:planned_pose(plan_times,plan_poses[s],float(d.time)-stage_started) for s in ('left','right','torso')}
                 else:goalposes={s:targets[s+'_pose'][frame+strategy['command_pose_offset']].copy() for s in ('left','right','torso')}
                 desired={s:p.copy() for s,p in goalposes.items()}
                 comp=policy['compensation']
-                if stage in ('approach','contact') and comp['mode']=='identified_equilibrium':
+                if stage in ('approach','grasp_probe','contact') and comp['mode']=='identified_equilibrium':
                     for hand in bindings['hands']:goalposes[hand][:3]=equilibrium_command(desired[hand][:3],comp['calibrations'][hand],comp['scope'])
                 poses=adapter.poses()
-                if feedback and stage in ('approach','contact'):
+                if feedback and stage in ('approach','grasp_probe','contact'):
                     for hand in bindings['hands']:
                         bias=feedback.update(hand,desired[hand][:3],poses[hand][:3],policy['control_dt_s'])
                         goalposes[hand][:3]+=bias
@@ -218,18 +227,38 @@ def execute_native(contract):
                     for s in ('left','right'):
                         if s not in bindings['hands']:targets[s+'_pose'][:]=actual[s]
                     targets['torso_pose'][:]=plan_poses['torso'][-1];np.savez_compressed(out/'adapted_execution_targets.npz',**targets)
-                    stage='approach';stage_started=float(d.time);events.append({'event':'measured_stance_plan','time_s':float(d.time),'actual_root':d.qpos[:7].tolist()})
+                    stage='approach';stage_started=float(d.time);grasp_clock_started=stage_started;last_query_elapsed=None;events.append({'event':'measured_stance_plan','time_s':float(d.time),'actual_root':d.qpos[:7].tolist()})
                 elif elapsed>=policy['budgets']['settle_s']:raise WorkflowError('settling_timeout')
-            elif stage=='approach':
+            elif stage in ('approach','grasp_probe'):
                 elapsed=float(d.time)-stage_started
                 window=policy['settle']['window_s']
                 rows=recent.rows
                 ob['recent_root_drift_m']=None if elapsed<window else max(float(np.linalg.norm(np.array(x['root_pose'][:2])-rows[0]['root_pose'][:2])) for x in rows)
                 stable=base_is_stable(ob,policy['settle']);settled=settled+dt if stable and float(d.time)>=stance_shift_until else 0.
                 ob.update(stable_sample=stable,continuous_stable_s=settled)
-                if elapsed>=plan_times[-1] and settled+1e-12>=policy['settle']['continuous_s'] and steps%stride==0:
-                    stage='contact';contact_started=float(d.time);events.append({'event':'contact_started','retry_index':retry_index,'time_s':contact_started,'actual_root':d.qpos[:7].tolist(),'base_stable':True,'wrist_pose_gate':False})
-                elif elapsed>=policy['budgets']['approach_s']:raise WorkflowError('approach_timeout')
+                if trigger and steps%stride==0:
+                    judge_elapsed=float(d.time)-grasp_clock_started
+                    if query_due(stage,judge_elapsed,float(plan_times[-1]),last_query_elapsed,judge.calls,trigger):
+                        last_query_elapsed=judge_elapsed
+                        evidence={'measured':ob,'geometry':geometry(adapter,d.qpos.copy(),targets['fingers'][phases[0]['end']-1]),
+                                  'source_reference':source_geometry,'execution':{'stage':stage,'approach_elapsed_s':judge_elapsed,'planned_approach_s':float(plan_times[-1]),'query_index':judge.calls,'query_budget':trigger['max_calls'],'fingers_held_open':True,'source_access':True,'simulation_paused':True}}
+                        decision=judge.decide(evidence,out/'grasp_decisions'/str(judge.calls))
+                        events.append({'event':'grasp_judgment','time_s':float(d.time),'retry_index':retry_index,'query_index':judge.calls-1,'decision':decision})
+                        if decision['action']=='abort':raise WorkflowError('gpt_grasp_aborted',decision['reason'])
+                        if decision['action']=='close_now':
+                            np.savez_compressed(out/('gpt_pretrigger_targets_'+str(retry_index)+'.npz'),**targets)
+                            actual=adapter.poses();targets=trigger_targets(targets,actual,bindings['hands'],start=phases[0]['start'],lift=phases[0]['end'],end=last,offset=strategy['command_pose_offset'])
+                            np.savez_compressed(out/('gpt_trigger_targets_'+str(retry_index)+'.npz'),**targets)
+                            triggered_retries.append(retry_index);frame=phases[0]['start'];phase_id=None;stage='contact';contact_started=float(d.time);force_tick=True
+                            events.append({'event':'contact_started','retry_index':retry_index,'time_s':contact_started,'actual_root':d.qpos[:7].tolist(),'base_stable':stable,'wrist_pose_gate':False,'trigger':'gpt_privileged','skipped_approach_remaining_s':max(0.,float(plan_times[-1])-judge_elapsed),'wrist_hold':{k:v.tolist() for k,v in actual.items()},'original_contact_wrist_trajectory_replaced':True})
+                            continue
+                        if judge.calls>=trigger['max_calls']:raise WorkflowError('grasp_decision_budget_exhausted')
+                if stage=='approach' and elapsed>=plan_times[-1] and settled+1e-12>=policy['settle']['continuous_s'] and steps%stride==0:
+                    if trigger:
+                        stage='grasp_probe';stage_started=float(d.time);events.append({'event':'grasp_probe_started','time_s':float(d.time),'fingers':'open','retry_index':retry_index})
+                    else:
+                        stage='contact';contact_started=float(d.time);events.append({'event':'contact_started','retry_index':retry_index,'time_s':contact_started,'actual_root':d.qpos[:7].tolist(),'base_stable':True,'wrist_pose_gate':False})
+                elif float(d.time)-grasp_clock_started>=policy['budgets']['approach_s']:raise WorkflowError('approach_timeout')
             elif stage=='recovery_open':
                 elapsed=float(d.time)-stage_started
                 if contacts['support_N']<=policy['acceptance']['support_force_N']:raise WorkflowError('recovery_support_lost')
@@ -280,7 +309,7 @@ def execute_native(contract):
             write('controller.json',adapter.sonic.records);write('planner.json',adapter.sonic.planner_records)
         audit={'experiment_id':root.name,'started_at':start,'ended_at':now(),'simulation_wall_s':time.monotonic()-clock,
                'online_planning_wall_s':online_planning_s,'sim_seconds':float(adapter.d.time) if adapter else 0.,
-               'navigation_corrections':nav_cycle,'navigation_sim_s':nav_elapsed,'api_calls_during_execution':0,'recovery_count':retry_index,'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),'attempted_commands':len(attempted),'completed_commands':len(commands),
+               'navigation_corrections':nav_cycle,'navigation_sim_s':nav_elapsed,'api_calls_during_execution':judge.calls if judge else 0,'model_judgment_wall_s':judge.wall_s if judge else 0.,'simulation_compute_wall_s':time.monotonic()-clock-(judge.wall_s if judge else 0.),'gpt_triggered_retries':triggered_retries,'recovery_count':retry_index,'completed':completed,'failure':failure,'error_type':error_type,'physics_steps':steps,'recorded_steps':len(states),'attempted_commands':len(attempted),'completed_commands':len(commands),
                'actual_encoder_modes':sorted(set(x['mode'] for x in commands)),'original_token_prefix_count':0,'mode0_calls':0,
                'midrun_state_resets':0,'fallback':False,'contact_started_at_s':contact_started,'stage':stage,'source_end_exclusive':frame}
         write('execution_audit.json',audit)
