@@ -99,7 +99,7 @@ def _execute_job(store_root, job_id, supervisor_pid):
         verify_inputs(source_hashes)
         implementations = {str(p): file_hash(p) for p in service.implementation_files().values()}
         cases = sample_conditions(job)
-        for condition in cases:
+        for case_number, condition in enumerate(cases):
             name = condition['case_id']
             previous = store.get(job_id)['cases'].get(name)
             if previous and previous['stage'] in ('verified', 'failed', 'exported', 'interrupted'):
@@ -134,11 +134,19 @@ def _execute_job(store_root, job_id, supervisor_pid):
                     if stage == 'plan':
                         result = service.plan(request); strategy_id = result['strategy_id']
                     elif stage == 'prepare':
-                        result = service.prepare(strategy_id, request); experiment = Path(result['experiment_path'])
+                        if 'motion_noise' in job:
+                            from .noise import freeze_noise
+                            noise = dict(job['motion_noise'], seed=job['motion_noise']['seed']+case_number)
+                            with freeze_noise(noise): result = service.prepare(strategy_id, request)
+                        else: result = service.prepare(strategy_id, request)
+                        experiment = Path(result['experiment_path'])
                         store.record_case(job_id, name, 'prepared', {'experiment_path': str(experiment)})
                     else:
                         store.record_case(job_id, name, 'executing', {'execution_started_at': now()})
-                        result = service.execute(experiment)
+                        if 'motion_noise' in job:
+                            from .noise import execute_case
+                            result = execute_case(experiment)
+                        else: result = service.execute(experiment)
                     stage_times[stage] = {'started_at': stage_start, 'ended_at': now(), 'wall_s': time.monotonic()-clock}
                     (directory/name/(stage+'.json')).write_bytes(canonical(result))
                 details = {'result': result, 'success': result.get('physical_task_completed') is True,

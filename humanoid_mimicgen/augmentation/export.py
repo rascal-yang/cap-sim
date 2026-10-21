@@ -87,6 +87,9 @@ def export_case(experiment, destination):
                 'Frozen contract changed', 'integrity_error')
         c = read(root/'experiment.json')
         require(c['record_status'] == 'frozen_ready' and c['preflight']['passed'], 'Unfrozen experiment', 'integrity_error')
+        if c.get('control',{}).get('motion_noise'):
+            paths += [out/'motion_noise.npz', out/'motion_noise.json']
+            sources.update({str(p): file_hash(p) for p in paths[-2:]})
         resolved_evidence = frozen_evidence(root, c['preflight']['evidence_sha256'])
         if destination.exists(): return _validate_existing(destination, sources)
         meta = read(root/'native_preflight.json'); nq, nv, nu = (meta[k] for k in ('model_nq', 'model_nv', 'model_nu'))
@@ -124,6 +127,21 @@ def export_case(experiment, destination):
         require(arrays['action_ctrl'].shape == (n, nu) and np.array_equal(arrays['action_ctrl'], states[:, 1+nq+nv:]),
                 'Applied control differs from command', 'alignment_error')
         require(all(np.isfinite(a).all() for a in arrays.values()) and np.isfinite(states).all(), 'Nonfinite trajectory', 'alignment_error')
+        if c.get('control',{}).get('motion_noise'):
+            config = c['control']['motion_noise']; noise_meta = read(out/'motion_noise.json')
+            require(all(noise_meta['config'].get(k)==config[k] for k in noise_meta['config']), 'Noise configuration mismatch', 'integrity_error')
+            require(file_hash(out/'motion_noise.npz')==noise_meta['npz_sha256'], 'Noise record changed', 'integrity_error')
+            with np.load(out/'motion_noise.npz', allow_pickle=False) as noise:
+                require(len(noise['time_s'])==len(attempted) and np.array_equal(noise['time_s'][:n],times), 'Noise time alignment', 'alignment_error')
+                require(np.array_equal(noise['executed_body_target_rad'][:n],arrays['body_target_rad']) and
+                        np.array_equal(noise['executed_ctrl_Nm'][:n],arrays['action_ctrl']), 'Noise action alignment', 'alignment_error')
+                arrays['nominal_body_target_rad']=noise['nominal_body_target_rad'][:n].copy()
+                arrays['nominal_ctrl_Nm']=noise['nominal_ctrl_Nm'][:n].copy()
+                arrays['noise_policy_tick']=noise['policy_tick'][:n].copy()
+                arrays['body_target_noise_rad']=arrays['body_target_rad']-arrays['nominal_body_target_rad']
+                indices=noise_meta['arm_target_indices']; other=[i for i in range(arrays['body_target_rad'].shape[1]) if i not in indices]
+                require(len(indices)==14 and np.all(arrays['body_target_noise_rad'][:,other]==0), 'Unexpected perturbed joints', 'integrity_error')
+                require(all(np.isfinite(a).all() for a in arrays.values()), 'Nonfinite noise labels', 'alignment_error')
         physical = _success_checks(c, audit, result, observations, commands, dt)
         summary = {'schema_version': 1, 'experiment_id': c['experiment_id'], 'path': str(destination),
             'physical_success': physical, 'transitions': n, 'attempted_commands': len(attempted),
@@ -136,6 +154,9 @@ def export_case(experiment, destination):
                               'visual_acceptance': 'unknown'} for name, p in videos.items()}}
         # A result flag alone is not a visual acceptance certificate.
         summary['training_ready'] = False
+        if c.get('control',{}).get('motion_noise'):
+            summary['motion_noise']=c['control']['motion_noise']
+            summary['intended_action_label']='nominal_body_target_rad; applied actions retained separately'
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.export-', dir=destination.parent) as tmp:
             staging = Path(tmp)

@@ -83,7 +83,7 @@ def materialize_case(job, condition, directory):
     # A historical study's purpose is not the purpose of this new run.
     files.pop('study_case', None)
     study = {'purpose': {'hypothesis': 'Execute fixed-policy trajectory retargeting under declared initial planar changes',
-        'baseline_paths': [job['baseline_request']], 'planned_changes': [condition],
+        'baseline_paths': [job['baseline_request']], 'planned_changes': [condition]+([{'motion_noise':job['motion_noise'],'case_seed':'base seed plus case index; frozen per case'}] if 'motion_noise' in job else []),
         'invariants': ['SONIC encoder1 only', 'No runtime model decisions', 'No physical state resets after initialization'],
         'known_confounders': ['Trajectory retargeting with original source access; not a matched ten-condition controller comparison']}}
     (directory/'study_case.json').write_bytes(canonical(study)); files['study_case'] = str(directory/'study_case.json')

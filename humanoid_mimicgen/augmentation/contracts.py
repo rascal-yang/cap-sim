@@ -18,7 +18,7 @@ def require(condition, detail, code='invalid_input'):
 
 def validate_shape(job):
     canonical(job)
-    require(isinstance(job, dict) and set(job) == FIELDS, 'Job fields')
+    require(isinstance(job, dict) and FIELDS <= set(job) <= FIELDS | {'motion_noise'}, 'Job fields')
     require(type(job['schema_version']) is int and job['schema_version'] == 1, 'Job schema version')
     require(isinstance(job['request_id'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', job['request_id']), 'Request ID')
     for key in ('baseline_request', 'output_root'):
@@ -26,6 +26,9 @@ def validate_shape(job):
     for key in ('render', 'export'):
         require(type(job[key]) is bool, key)
     require(job['stance_hint_frame'] in ('world', 'object_relative'), 'Explicit stance hint frame')
+    if 'motion_noise' in job:
+        from .noise import validate_noise
+        validate_noise(job['motion_noise'])
     b = job['budgets']
     require(isinstance(b, dict) and set(b) == {'max_cases', 'wall_s'}, 'Budget fields')
     require(type(b['max_cases']) is int and b['max_cases'] > 0, 'Case budget')

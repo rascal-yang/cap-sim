@@ -109,3 +109,16 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 scripts/humano_python.sh -m pytest humanoid_mim
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 scripts/humano_python.sh -m pytest humanoid_mimicgen/tests -q
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 scripts/humano_python.sh -m pytest tests -q
 ```
+
+
+## 运动扰动试验
+
+可选 job.motion_noise 必须显式指定 seed、sigma_rad、interface="post_sonic_joint_target"、
+resample="policy_tick"、joint_group="both_arms"。独立高斯噪声在每次 SONIC policy tick
+采样，两个 tick 间保持，并按模型关节范围裁剪。作用于双臂 14 维关节目标，覆盖导航、
+接近、接触和恢复；手指和腿部不加噪。逐例 seed 为任务 seed 加案例序号。
+每例冻结合同声明该接口，使用 augmentation execute-case 执行。
+导出同时保留 nominal_body_target_rad、带噪 body_target_rad、nominal_ctrl_Nm 和实际 action_ctrl；
+无噪标签来自带扰动实测状态上的控制器输出，不声称是独立人工纠错标签。
+迁移后的历史输入可用 relocation.rebase_baseline 构建新模板；先验证历史文件字节哈希，
+只改派生副本中的路径，原冻结记录不变。

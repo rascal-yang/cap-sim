@@ -18,10 +18,14 @@ def main(argv=None):
         p = sub.add_parser(name); p.add_argument('--store', required=True); p.add_argument('--job-id', required=True)
     p = sub.add_parser('init-experiment'); p.add_argument('--root', default='../experiments'); p.add_argument('--description', default='api_augmentation')
     p = sub.add_parser('index-history'); p.add_argument('--root', default='../experiments')
+    p = sub.add_parser('execute-case'); p.add_argument('--experiment', required=True)
     args = parser.parse_args(argv)
     try:
         with diagnostics_to_stderr():
-            if args.command == 'init-experiment':
+            if args.command == 'execute-case':
+                from .noise import execute_case
+                result = execute_case(args.experiment)
+            elif args.command == 'init-experiment':
                 from .records import create_record
                 path = create_record(args.root, args.description)
                 result = {'experiment_id': path.name, 'path': str(path.absolute()), 'physics_steps': 0}
