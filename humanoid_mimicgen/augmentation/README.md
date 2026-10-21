@@ -16,7 +16,8 @@ scripts/humano_python.sh -m humanoid_mimicgen.augmentation init-experiment \
 返回路径形如 `experiments/2026-10/21/20261021_1607_api_augmentation`。
 将返回的 path 用作 job.output_root，experiment_id 用作 request_id，job/provider 配置也保存在其中。
 批次内部 case 的物理证据仍保存在该批次自己的 experiments 子目录，不改变旧工作流。
-`index-history --root ../experiments` 为历史目录建立月／日符号链接，不搬动或修改原始记录。
+历史目录已实际迁入月／日，外层不保留兼容链接；旧绝对路径在 `experiments/_index/latest-migration.json` 指向的映射中留档。冻结文件保持原文，旧配置重跑前需解析映射。
+`index-history` 仅用于为后来出现的平铺旧目录建立分类入口，不是本次物理迁移命令。
 目录名无法确定日期的项目列在 unclassified，不按文件修改时间猜测。
 
 从当前分支仓库根目录执行。示例引用本机已有的苹果示范；迁移机器时替换
