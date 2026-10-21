@@ -164,3 +164,25 @@ def test_provider_sends_explicit_reasoning_effort(monkeypatch):
     assert 'test-only-secret' not in json.dumps(captured)
     config['reasoning_effort'] = 'made-up'
     with pytest.raises(WorkflowError): ResponsesProvider(config)
+
+
+def test_provider_streams_terminal_response_and_identifies_client(monkeypatch):
+    import io
+    from humanoid_mimicgen.augmentation import provider
+    config = {'protocol': 'responses', 'base_url': 'https://api.example.test/v1', 'model': 'gpt-6-astra',
+              'key_env': 'AUGMENT_TEST_KEY', 'timeout_s': 5, 'max_rounds': 6,
+              'max_output_tokens': 2048, 'wall_s': 60, 'reasoning_effort': 'low', 'stream': True}
+    monkeypatch.setenv('AUGMENT_TEST_KEY', 'test-only-secret')
+    result = {'model': 'gpt-6-astra', 'status': 'completed', 'output': [], 'usage': {'total_tokens': 7}}
+    events = ['event: response.created\ndata: '+json.dumps({'type':'response.created'})+'\n\n',
+              'event: response.completed\ndata: '+json.dumps({'type':'response.completed', 'response':result})+'\n\n']
+    class Opener:
+        def open(self, request, timeout):
+            assert request.get_header('User-agent') == 'cap-sim-augmentation/1.0'
+            assert json.loads(request.data)['stream'] is True
+            return io.BytesIO(''.join(events).encode())
+    monkeypatch.setattr(provider.urllib.request, 'build_opener', lambda *args: Opener())
+    assert ResponsesProvider(config).respond([], [], 'test') == result
+    events.pop()
+    with pytest.raises(WorkflowError, match='invalid_api_response'):
+        ResponsesProvider(config).respond([], [], 'test')
