@@ -1,0 +1,115 @@
+import json
+from pathlib import Path
+import pytest
+from humanoid_mimicgen.augmentation import agent, tools
+from humanoid_mimicgen.augmentation.jobs import JobStore
+from humanoid_mimicgen.augmentation.provider import ResponsesProvider
+from humanoid_mimicgen.workflow.contracts import WorkflowError
+from humanoid_mimicgen.augmentation.tests.test_conditions import job
+
+
+def call(ident, name, arguments):
+    return {'type': 'function_call', 'call_id': ident, 'name': name, 'arguments': json.dumps(arguments)}
+
+
+class Scripted:
+    def __init__(self, replies): self.replies = iter(replies); self.inputs = []
+    def respond(self, input_items, tools, instructions):
+        self.inputs.append(json.loads(json.dumps(input_items)))
+        return next(self.replies)
+
+
+def reply(*items): return {'status': 'completed', 'model': 'test-model', 'output': list(items)}
+
+
+def setup(tmp_path, monkeypatch):
+    j = job(); j['output_root'] = str(tmp_path/'output')
+    path = tmp_path/'job.json'; path.write_text(json.dumps(j))
+    config = {'protocol': 'responses', 'base_url': 'https://api.example.test/v1', 'model': 'test-model',
+              'key_env': 'AUGMENT_TEST_KEY', 'timeout_s': 5, 'max_rounds': 6, 'max_output_tokens': 1000, 'wall_s': 20}
+    p = tmp_path/'provider.json'; p.write_text(json.dumps(config))
+    store = JobStore(tmp_path/'store')
+    monkeypatch.setattr(tools, 'validate_job', lambda j: {'status': 'validated', 'input_hashes': {}, 'physics_steps': 0})
+    def complete(store, ident):
+        store.claim(ident, {})
+        store.transition(ident, 'running', 'completed', {'successes': 1, 'case_count': 1})
+        return {'job_id': ident, 'status': 'completed'}
+    monkeypatch.setattr(tools, 'start_job', complete)
+    return path, p, store
+
+
+def test_model_reads_skill_and_submits_job(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    transport = Scripted([reply(call('read', 'read_skill', {'name': 'augmentation'})),
+                          reply(call('submit', 'submit_job', {})), reply()])
+    result = agent.run_agent(path, config, store, transport=transport)
+    assert result['status'] == 'completed' and result['job']['details']['successes'] == 1
+    assert result['transport'] == 'injected' and result['api_calls'] == 3
+    # The consumer receives actual skill content, not a path inaccessible to the model.
+    outputs = [x for x in transport.inputs[1] if x.get('type') == 'function_call_output']
+    loaded = json.loads(outputs[0]['output'])
+    assert len(loaded['content']) > 100 and loaded['sha256']
+
+
+def test_repeated_call_reuses_result(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    transport = Scripted([reply(call('read', 'read_skill', {'name': 'augmentation'})),
+                          reply(call('submit', 'submit_job', {})),
+                          reply(call('submit', 'submit_job', {})), reply()])
+    result = agent.run_agent(path, config, store, transport=transport)
+    assert result['job']['details']['successes'] == 1
+    assert len(list((store.root/'agents').iterdir())) == 1
+    # Restart consumes persisted replies and tool results, without another provider call.
+    again = agent.run_agent(path, config, store, transport=Scripted([]))
+    assert again['job']['job_id'] == result['job']['job_id']
+
+
+def test_unknown_tool_rejected(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    with pytest.raises(WorkflowError, match='unsupported_tool'):
+        agent.run_agent(path, config, store, transport=Scripted([reply(call('x', 'shell', {'cmd': 'echo bad'}))]))
+
+
+@pytest.mark.parametrize('raw', [{'status': 'incomplete', 'output': []},
+    reply({'type': 'message', 'content': [{'type': 'refusal', 'refusal': 'no'}]})])
+def test_refusal_and_incomplete_response(tmp_path, monkeypatch, raw):
+    path, config, store = setup(tmp_path, monkeypatch)
+    with pytest.raises(WorkflowError): agent.run_agent(path, config, store, transport=Scripted([raw]))
+
+
+def test_missing_usage_stays_unknown(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    transport = Scripted([reply(call('read', 'read_skill', {'name': 'augmentation'})), reply(call('submit', 'submit_job', {})), reply()])
+    result = agent.run_agent(path, config, store, transport=transport)
+    assert result['usage'] is None
+
+
+def test_credentials_absent_from_logs(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    secret = 'test-secret-do-not-log'; monkeypatch.setenv('AUGMENT_TEST_KEY', secret)
+    agent.run_agent(path, config, store, transport=Scripted([
+        reply(call('read', 'read_skill', {'name': 'augmentation'})), reply(call('submit', 'submit_job', {})), reply()]))
+    assert all(secret not in p.read_text() for p in (store.root/'agents').rglob('*.json'))
+
+
+def test_no_runtime_model_polling(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    result = agent.run_agent(path, config, store, transport=Scripted([
+        reply(call('read', 'read_skill', {'name': 'augmentation'})), reply(call('submit', 'submit_job', {})), reply()]))
+    assert result['api_calls'] == 3
+
+
+def test_empty_model_success_does_not_mean_task_success(tmp_path, monkeypatch):
+    path, config, store = setup(tmp_path, monkeypatch)
+    with pytest.raises(WorkflowError, match='incomplete_workflow'):
+        agent.run_agent(path, config, store, transport=Scripted([reply()]))
+
+
+def test_provider_rejects_insecure_endpoint_and_absent_key(monkeypatch):
+    config = {'protocol': 'responses', 'base_url': 'http://bad', 'model': 'test-model', 'key_env': 'NO_API_TEST_KEY',
+              'timeout_s': 1, 'max_rounds': 2, 'max_output_tokens': 100, 'wall_s': 2}
+    with pytest.raises(WorkflowError): ResponsesProvider(config)
+    config['base_url'] = 'https://api.example.test/v1'
+    monkeypatch.delenv('NO_API_TEST_KEY', raising=False)
+    with pytest.raises(WorkflowError, match='api_unavailable'):
+        ResponsesProvider(config).respond([], [], 'test')
