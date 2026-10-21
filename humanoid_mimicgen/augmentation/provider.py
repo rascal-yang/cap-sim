@@ -13,12 +13,18 @@ FIELDS = {'protocol', 'base_url', 'model', 'key_env', 'timeout_s', 'max_rounds',
 
 def validate_config(config):
     canonical(config)
-    require(isinstance(config, dict) and FIELDS <= set(config) <= FIELDS | {'reasoning_effort', 'stream'}, 'Provider configuration fields')
+    require(isinstance(config, dict) and FIELDS <= set(config) <= FIELDS | {'reasoning_effort', 'stream', 'headers_env'}, 'Provider configuration fields')
     require(config['protocol'] == 'responses', 'Unsupported API protocol')
     if 'reasoning_effort' in config:
         require(config['reasoning_effort'] in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'), 'Reasoning effort')
     if 'stream' in config:
         require(type(config['stream']) is bool, 'Stream must be boolean')
+    extra = config.get('headers_env', {})
+    require(isinstance(extra, dict), 'Header environment mapping')
+    for header, env in extra.items():
+        require(isinstance(header, str) and re.fullmatch(r'[A-Za-z0-9-]+', header) and
+                header.lower() not in ('authorization', 'host', 'content-type', 'content-length', 'transfer-encoding', 'cookie', 'user-agent'), 'Custom header name')
+        require(isinstance(env, str) and re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', env), 'Header environment name')
     url = urlsplit(config['base_url'])
     require(url.scheme == 'https' and url.netloc and not any((url.username, url.password, url.query, url.fragment)),
             'HTTPS endpoint without embedded credentials required')
@@ -73,8 +79,13 @@ class ResponsesProvider:
             body['reasoning'] = {'effort': c['reasoning_effort']}
         if c.get('stream'):
             body['stream'] = True
+        headers = {'User-Agent': 'cap-sim-augmentation/1.0', 'Content-Type': 'application/json', 'Authorization': 'Bearer '+key}
+        for name, env in c.get('headers_env', {}).items():
+            value = os.environ.get(env)
+            require(bool(value) and '\r' not in value and '\n' not in value, 'Configured header absent or invalid', 'api_unavailable')
+            headers[name] = value
         request = urllib.request.Request(c['base_url'].rstrip('/')+'/responses', data=canonical(body),
-            headers={'User-Agent': 'cap-sim-augmentation/1.0', 'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
+            headers=headers)
         try:
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=c['timeout_s']) as response:
                 if c.get('stream'):

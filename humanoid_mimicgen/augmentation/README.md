@@ -24,6 +24,7 @@ API 配置中的 model 替换为提供方实际支持的模型，base_url 为 Re
 根地址（代码追加 `/responses`），凭据放在 key_env 指定的环境变量中。
 可选配置 `reasoning_effort` 会传入 Responses 的 `reasoning.effort`，例如 `low`。
 仅接受流式请求的网关可配置 `stream: true`；终止响应完整后才执行工具，断流不会推断成功。
+自定义网关请求头用 `headers_env` 映射到环境变量名称，值不写入配置或日志。
 没有 API key 时本地 validate/submit/inspect/export 仍可使用。
 当前提供者只实现 Responses，不会静默改用 Codex CLI 登录或别的协议。
 

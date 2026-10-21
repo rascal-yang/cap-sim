@@ -171,13 +171,15 @@ def test_provider_streams_terminal_response_and_identifies_client(monkeypatch):
     from humanoid_mimicgen.augmentation import provider
     config = {'protocol': 'responses', 'base_url': 'https://api.example.test/v1', 'model': 'gpt-6-astra',
               'key_env': 'AUGMENT_TEST_KEY', 'timeout_s': 5, 'max_rounds': 6,
-              'max_output_tokens': 2048, 'wall_s': 60, 'reasoning_effort': 'low', 'stream': True}
+              'max_output_tokens': 2048, 'wall_s': 60, 'reasoning_effort': 'low', 'stream': True, 'headers_env': {'x-openai-actor-authorization': 'AUGMENT_TEST_ACTOR'}}
+    monkeypatch.setenv('AUGMENT_TEST_ACTOR', 'test-actor')
     monkeypatch.setenv('AUGMENT_TEST_KEY', 'test-only-secret')
     result = {'model': 'gpt-6-astra', 'status': 'completed', 'output': [], 'usage': {'total_tokens': 7}}
     events = ['event: response.created\ndata: '+json.dumps({'type':'response.created'})+'\n\n',
               'event: response.completed\ndata: '+json.dumps({'type':'response.completed', 'response':result})+'\n\n']
     class Opener:
         def open(self, request, timeout):
+            assert request.get_header('X-openai-actor-authorization') == 'test-actor'
             assert request.get_header('User-agent') == 'cap-sim-augmentation/1.0'
             assert json.loads(request.data)['stream'] is True
             return io.BytesIO(''.join(events).encode())
