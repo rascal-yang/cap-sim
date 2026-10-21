@@ -184,3 +184,15 @@ def test_recovery_does_not_trust_cached_success(tmp_path, monkeypatch):
     assert result['cases']['a']['stage']=='failed'
     assert result['cases']['a']['details'].get('success') is not True
     assert (tmp_path/'executed').read_text()=='b\n'
+
+
+def test_total_wall_time_includes_export(tmp_path, monkeypatch):
+    from humanoid_mimicgen.augmentation import export
+    store,ident,source=fixture(tmp_path,monkeypatch)
+    j=store.get(ident)['job']; j.update(request_id='with-export',export=True)
+    ident=store.submit(j,{str(source):file_hash(source)})['job_id']
+    def slow_export(s,i):time.sleep(.15);return {'case_count':2}
+    monkeypatch.setattr(export,'export_job',slow_export)
+    result=worker.run_job(store,ident)
+    assert result['details']['export_wall_s']>=.15
+    assert result['details']['total_wall_s']>=sum(c['details']['total_wall_s'] for c in result['cases'].values())+.15

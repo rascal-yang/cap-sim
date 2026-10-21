@@ -164,9 +164,14 @@ def _execute_job(store_root, job_id, supervisor_pid):
                    'case_count': len(cases), 'ended_at': now(), 'total_wall_s': time.monotonic()-started,
                    'artifact_path': str(directory), 'budget_used_s': row['details'].get('budget_used_s', 0.)+time.monotonic()-started, 'physics_success_is_not_batch_status': True}
         summary['success_rate'] = summary['successes']/len(cases)
+        summary['export_wall_s'] = None
         if job['export']:
             from .export import export_job
+            export_started = time.monotonic()
             summary['export'] = export_job(store, job_id)
+            summary['export_wall_s'] = time.monotonic()-export_started
+        summary.update(ended_at=now(), total_wall_s=time.monotonic()-started,
+                       budget_used_s=row['details'].get('budget_used_s', 0.)+time.monotonic()-started)
         (directory/'summary.json').write_bytes(canonical(summary))
         store.transition(job_id, 'running', 'completed', summary)
     except Exception as exc:
