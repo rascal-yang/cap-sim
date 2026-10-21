@@ -1,5 +1,6 @@
 """Versioned job inputs. Reading and validation never advance physics."""
 import json
+import os
 from pathlib import Path
 import re
 
@@ -38,7 +39,7 @@ def load_job(path):
         job = json.loads(path.read_text())
         validate_shape(job)
         for key in ('baseline_request', 'output_root'):
-            job[key] = str((path.parent / job[key]).resolve())
+            job[key] = os.path.abspath(path.parent / job[key])
         return job
     except (OSError, ValueError, TypeError) as exc:
         if isinstance(exc, WorkflowError):
@@ -47,7 +48,7 @@ def load_job(path):
 
 
 def baseline_request(job):
-    path = Path(job['baseline_request']).resolve()
+    path = Path(os.path.abspath(job['baseline_request']))
     try:
         request = json.loads(path.read_text())
         require(request['decision'] == {'mode': 'deterministic'}, 'Deterministic execution required')
@@ -55,7 +56,7 @@ def baseline_request(job):
         require('grasp_trigger' not in request['strategy']['policy'], 'Runtime model grasp trigger disabled')
         validate_strategy(request['strategy'])
         validate_policy(request['strategy']['policy'])
-        request['files'] = {k: str((path.parent / v).resolve()) for k, v in request['files'].items()}
+        request['files'] = {k: os.path.abspath(path.parent / v) for k, v in request['files'].items()}
         for name in ('model', 'initial', 'targets', 'reference_states', 'task', 'record', 'alignment'):
             require(name in request['files'], 'Missing evidence ' + name)
         return request
@@ -75,7 +76,7 @@ def validate_job(job):
     from .conditions import sample_conditions
     cases = sample_conditions(job)
     request = baseline_request(job)
-    files = {str(Path(job['baseline_request']).resolve()), *request['files'].values()}
+    files = {os.path.abspath(job['baseline_request']), *request['files'].values()}
     # Bind nested evidence and resources before queueing. Runtime loading remains prepare's responsibility.
     try:
         record = json.loads(Path(request['files']['record']).read_text())
@@ -86,7 +87,7 @@ def validate_job(job):
         task = json.loads(Path(request['files']['task']).read_text())
         from ..workflow.native import sonic_files
         files.update(sonic_files(task))
-        hashes = {str(Path(p).resolve()): file_hash(p) for p in sorted(files)}
+        hashes = {os.path.abspath(p): file_hash(p) for p in sorted(files)}
     except (OSError, KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, WorkflowError):
             raise

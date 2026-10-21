@@ -1,3 +1,4 @@
+from pathlib import Path
 import copy
 import json
 import numpy as np
@@ -112,3 +113,42 @@ def test_explicit_conditions_reject_duplicate_and_boolean_values():
     with pytest.raises(WorkflowError): sample_conditions(value)
     value['conditions']['cases'] = [row]; row['object_delta_xy'][0] = True
     with pytest.raises(WorkflowError): sample_conditions(value)
+
+
+def test_materialized_contract_names_new_case_and_binds_job_skill(tmp_path, monkeypatch):
+    import mujoco
+    from humanoid_mimicgen.augmentation import scene
+    from humanoid_mimicgen.workflow.contracts import file_hash
+    m, initial = model_and_initial()
+    model = tmp_path/'model.mjb'; mujoco.mj_saveModel(m, str(model), None)
+    np.savez(tmp_path/'initial.npz', **initial)
+    (tmp_path/'task.json').write_text(json.dumps({'resources':{'initial_state':'old'}}))
+    (tmp_path/'record.json').write_text(json.dumps({'cases':[{'id':'historical'}], 'physics':{},
+          'pipeline':{'skill_versions_and_hashes':[]}, 'preflight':{'evidence_sha256':{}}}))
+    request={'files':{k:str(tmp_path/v) for k,v in [('model','model.mjb'),('initial','initial.npz'),('task','task.json'),('record','record.json')]},
+        'strategy':{'bindings':{'root_body':'pelvis','object':'apple'}, 'policy':{'planning':{'penetration_tolerance_m':1e-5}},'provenance':{}}}
+    monkeypatch.setattr(scene,'baseline_request',lambda j:copy.deepcopy(request))
+    value=job(); value['output_root']=str(tmp_path/'output')
+    condition={'case_id':'new_case','robot_delta_xyyaw':[0,0,0],'object_delta_xy':[0,.1]}
+    path=scene.materialize_case(value,condition,tmp_path/'case')
+    actual=json.loads(path.read_text()); record=json.loads(Path(actual['files']['record']).read_text())
+    assert record['cases'][0]['id']=='new_case'
+    assert record['cases'][0]['initial_state_sha256']==file_hash(actual['files']['initial'])
+    assert json.loads(Path(actual['files']['augmentation_job']).read_text())['conditions']['seed']==17
+    assert record['pipeline']['skill_versions_and_hashes'][-1]['sha256']==file_hash(actual['files']['augmentation_skill'])
+
+
+def test_baseline_keeps_symlink_alias_for_hash_validation(tmp_path, monkeypatch):
+    from humanoid_mimicgen.augmentation import contracts
+    old=tmp_path/'old'; old.write_text('old'); new=tmp_path/'new'; new.write_text('new')
+    alias=tmp_path/'targets'; alias.symlink_to(old)
+    request={'decision':{'mode':'deterministic'},'strategy':{'adapter':'g1_sonic_native_v1','policy':{}},
+             'files':{k:str(alias) for k in ('model','initial','targets','reference_states','task','record','alignment')}}
+    path=tmp_path/'baseline.json'; path.write_text(json.dumps(request))
+    monkeypatch.setattr(contracts,'validate_strategy',lambda s:s)
+    monkeypatch.setattr(contracts,'validate_policy',lambda p:p)
+    normalized=contracts.baseline_request({'baseline_request':str(path)})
+    from humanoid_mimicgen.workflow.contracts import file_hash
+    hashes={p:file_hash(p) for p in normalized['files'].values()}
+    alias.unlink(); alias.symlink_to(new)
+    with pytest.raises(WorkflowError,match='integrity_error'): contracts.verify_inputs(hashes)

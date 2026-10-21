@@ -113,3 +113,31 @@ def test_provider_rejects_insecure_endpoint_and_absent_key(monkeypatch):
     monkeypatch.delenv('NO_API_TEST_KEY', raising=False)
     with pytest.raises(WorkflowError, match='api_unavailable'):
         ResponsesProvider(config).respond([], [], 'test')
+
+
+def test_cached_final_rechecks_input_evidence(tmp_path, monkeypatch):
+    path,config,store=setup(tmp_path,monkeypatch)
+    evidence=tmp_path/'input'; evidence.write_text('original')
+    from humanoid_mimicgen.workflow.contracts import file_hash
+    monkeypatch.setattr(tools,'validate_job',lambda j:{'status':'validated','input_hashes':{str(evidence):file_hash(evidence)},'physics_steps':0})
+    script=Scripted([reply(call('read','read_skill',{'name':'augmentation'})),reply(call('submit','submit_job',{})),reply()])
+    agent.run_agent(path,config,store,transport=script)
+    evidence.write_text('changed')
+    with pytest.raises(WorkflowError,match='integrity_error'):
+        agent.run_agent(path,config,store,transport=Scripted([]))
+
+
+def test_timeout_attempt_usage_remains_unknown_after_retry(tmp_path, monkeypatch):
+    path,config,store=setup(tmp_path,monkeypatch)
+    class TimeoutAfterRead:
+        count=0
+        def respond(self,*args):
+            self.count+=1
+            if self.count==1:
+                return dict(reply(call('read','read_skill',{'name':'augmentation'})),usage={'input_tokens':10,'output_tokens':2,'total_tokens':12})
+            raise TimeoutError('test')
+    with pytest.raises(TimeoutError): agent.run_agent(path,config,store,transport=TimeoutAfterRead())
+    valid=lambda *items:dict(reply(*items),usage={'input_tokens':10,'output_tokens':2,'total_tokens':12})
+    result=agent.run_agent(path,config,store,transport=Scripted([valid(call('submit','submit_job',{})),valid()]))
+    assert result['api_calls']==4
+    assert result['usage'] is None

@@ -109,3 +109,15 @@ def test_historical_export_uses_hash_matching_source_snapshot(tmp_path):
     assert export_case(root,tmp_path/'export')['transitions']==2
     snap.write_text('tampered')
     with pytest.raises(WorkflowError,match='integrity_error'): export_case(root,tmp_path/'other')
+
+
+def test_prefix_truncated_trace_cannot_use_initial_as_prestate(tmp_path):
+    root=trace(tmp_path,success=False); out=root/'execution'
+    for name in ('commands.json','attempted_commands.json','observations.json'):
+        p=out/name; p.write_bytes(canonical(json.loads(p.read_text())[1:]))
+    with np.load(out/'states.npz') as a: samples=a['samples'][1:].copy()
+    np.savez(out/'states.npz',samples=samples)
+    p=out/'execution_audit.json'; a=json.loads(p.read_text())
+    for key in ('physics_steps','recorded_steps','completed_commands'): a[key]=1
+    p.write_bytes(canonical(a))
+    with pytest.raises(WorkflowError,match='alignment'): export_case(root,tmp_path/'export')

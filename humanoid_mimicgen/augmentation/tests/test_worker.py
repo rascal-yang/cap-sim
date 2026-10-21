@@ -129,3 +129,58 @@ def test_resume_runs_only_unstarted_cases(tmp_path, monkeypatch):
     assert result['details']['successes'] == 1
     assert result['details']['case_count'] == 2
     assert (tmp_path/'executed').read_text() == 'b\n'
+
+
+def _hold_lock(queue):
+    with worker.device_lock() as acquired:
+        queue.put(acquired); time.sleep(.3)
+
+
+def test_busy_device_queues_then_executes(tmp_path, monkeypatch):
+    import multiprocessing as mp
+    store,ident,_=fixture(tmp_path,monkeypatch)
+    ctx=mp.get_context('spawn'); queue=ctx.Queue(); holder=ctx.Process(target=_hold_lock,args=(queue,))
+    holder.start(); assert queue.get(timeout=5)
+    try:
+        result=worker.run_job(store,ident)
+        assert result['status']=='completed'
+    finally: holder.join(5)
+
+
+def test_supervisor_interrupt_stops_child_before_unlock(tmp_path, monkeypatch):
+    import multiprocessing as mp
+    import signal
+    store,ident,_=fixture(tmp_path,monkeypatch)
+    ready=tmp_path/'physical_ready'
+    def execute(p): ready.write_text('ready'); time.sleep(20)
+    monkeypatch.setattr(service,'execute',execute)
+    supervisor=mp.get_context('fork').Process(target=worker.run_job,args=(store,ident))
+    supervisor.start()
+    owner=None
+    try:
+        deadline=time.monotonic()+4
+        while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)
+        assert ready.exists()
+        owner=store.get(ident)['owner']
+        os.kill(supervisor.pid,signal.SIGINT); supervisor.join(3)
+        assert not supervisor.is_alive()
+        assert not worker.process_alive(owner)
+        with worker.device_lock() as acquired: assert acquired
+    finally:
+        if owner and worker.process_alive(owner):
+            os.killpg(owner['pid'],signal.SIGKILL)
+        if supervisor.is_alive(): supervisor.kill(); supervisor.join()
+
+
+def test_recovery_does_not_trust_cached_success(tmp_path, monkeypatch):
+    store,ident,_=fixture(tmp_path,monkeypatch)
+    root=tmp_path/'cached'; root.mkdir()
+    (root/'result.json').write_text(json.dumps({'physical_task_completed':True,'status':'completed'}))
+    store.claim(ident,{'pid':99999999,'boot_id':'gone','start_ticks':'0'})
+    store.record_case(ident,'a','executing',{'experiment_path':str(root)})
+    monkeypatch.setattr(service,'check_contract',lambda path:{})
+    worker.reconcile_job(store,ident)
+    result=worker.resume_job(store,ident,background=False)
+    assert result['cases']['a']['stage']=='failed'
+    assert result['cases']['a']['details'].get('success') is not True
+    assert (tmp_path/'executed').read_text()=='b\n'

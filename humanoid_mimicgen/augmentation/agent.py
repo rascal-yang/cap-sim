@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import time
-from .contracts import load_job, require
+from .contracts import load_job, require, verify_inputs
 from .jobs import JobStore
 from .provider import ResponsesProvider, validate_config
 from . import tools
@@ -31,6 +31,29 @@ def wait_job(store, ident, deadline):
         time.sleep(min(.5, max(0., deadline-time.monotonic())))
 
 
+def attempt_stats(root):
+    attempts = [json.loads(p.read_text()) for p in sorted((root/'attempts').glob('*.json'))]
+    usage = None
+    keys = ('input_tokens', 'output_tokens', 'total_tokens')
+    if attempts and all(isinstance(a.get('usage'), dict) and all(type(a['usage'].get(k)) is int for k in keys) for a in attempts):
+        usage = {k: sum(a['usage'][k] for a in attempts) for k in keys}
+    wait = sum(a['wall_s'] for a in attempts) if all(a.get('wall_s') is not None for a in attempts) else None
+    return {'api_calls': len(attempts), 'usage': usage, 'api_wait_wall_s': wait}
+
+
+def replay_result(root, job, store):
+    saved = json.loads((root/'result.json').read_text())
+    row = store.get(saved['job']['job_id'])
+    verify_inputs(row['input_hashes'])
+    require(tools.bound_inputs(job) == row['input_hashes'], 'Submitted input bindings changed', 'integrity_error')
+    require(tools.summary(row) == saved['job'], 'Recorded job result changed', 'integrity_error')
+    if job['export'] and row['details'].get('export'):
+        from .export import export_job
+        require(export_job(store, row['job_id']) == row['details']['export'], 'Export result changed', 'integrity_error')
+    require(all(saved.get(k) == v for k, v in attempt_stats(root).items()), 'API accounting changed', 'integrity_error')
+    return saved
+
+
 def run_agent(task_path, config_path, store, transport=None):
     job = load_job(task_path)
     config = validate_config(json.loads(Path(config_path).read_text()))
@@ -38,7 +61,7 @@ def run_agent(task_path, config_path, store, transport=None):
     root = store.root/'agents'/session; root.mkdir(parents=True, exist_ok=True)
     context = {'job': job, 'store': store}
     if (root/'result.json').is_file():
-        return json.loads((root/'result.json').read_text())
+        return replay_result(root, job, store)
     provider = transport if transport is not None else ResponsesProvider(config)
     items = [{'role': 'user', 'content': canonical({'job': job, 'skill': {'name': 'augmentation',
              'description': 'Local G1 SONIC trajectory augmentation'}}).decode()}]
@@ -57,8 +80,20 @@ def run_agent(task_path, config_path, store, transport=None):
                 clock = time.monotonic()
                 if isinstance(provider, ResponsesProvider):
                     provider.config['timeout_s'] = min(config['timeout_s'], max(.001, deadline-clock))
-                raw = provider.respond(items, tools.tool_definitions(), INSTRUCTIONS)
-                timing = {'wall_s': time.monotonic()-clock, 'ended_at': now()}
+                attempt_dir = root/'attempts'; attempt_dir.mkdir(exist_ok=True)
+                attempt_path = attempt_dir/f'{len(list(attempt_dir.glob("*.json"))):06d}.json'
+                attempt = {'started_at': now(), 'status': 'started', 'usage': None, 'wall_s': None}
+                save(attempt_path, attempt)
+                try:
+                    raw = provider.respond(items, tools.tool_definitions(), INSTRUCTIONS)
+                    attempt.update(status='responded', usage=raw.get('usage'))
+                except BaseException as exc:
+                    attempt.update(status='failed', error_type=type(exc).__name__)
+                    raise
+                finally:
+                    attempt.update(wall_s=time.monotonic()-clock, ended_at=now())
+                    save(attempt_path, attempt)
+                timing = {'wall_s': attempt['wall_s'], 'ended_at': now()}
                 save(folder/'response.json', raw); save(folder/'timing.json', timing)
             calls += 1
             if timing['wall_s'] is not None: api_wait += timing['wall_s']
@@ -74,11 +109,8 @@ def run_agent(task_path, config_path, store, transport=None):
                 require(context.get('job_id'), 'No batch submitted', 'incomplete_workflow')
                 row = wait_job(store, context['job_id'], deadline)
                 require(row['status'] == 'completed', 'Job did not complete: '+row['status'], 'incomplete_workflow')
-                usage = None
-                if usages and all(isinstance(u, dict) and all(type(u.get(k)) is int for k in ('input_tokens', 'output_tokens', 'total_tokens')) for u in usages):
-                    usage = {k: sum(u[k] for u in usages) for k in ('input_tokens', 'output_tokens', 'total_tokens')}
                 result = {'status': 'completed', 'job': row, 'session_id': session, 'session_path': str(root),
-                    'api_calls': calls, 'usage': usage, 'api_wait_wall_s': api_wait, 'total_wall_s': time.monotonic()-start,
+                    **attempt_stats(root), 'total_wall_s': time.monotonic()-start,
                     'transport': 'injected' if transport else 'responses'}
                 save(root/'result.json', result); return result
             for action in actions:
@@ -101,5 +133,5 @@ def run_agent(task_path, config_path, store, transport=None):
     except Exception as exc:
         with (root/'failures.jsonl').open('ab') as f:
             f.write(canonical({'at': now(), 'reason_code': exc.code if isinstance(exc, WorkflowError) else 'agent_error',
-                'error_type': type(exc).__name__, 'api_calls': calls, 'usage_per_response': usages})+b'\n')
+                'error_type': type(exc).__name__, **attempt_stats(root), 'usage_per_response': usages})+b'\n')
         raise

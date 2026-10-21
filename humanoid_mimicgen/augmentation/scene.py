@@ -87,6 +87,28 @@ def materialize_case(job, condition, directory):
         'invariants': ['SONIC encoder1 only', 'No runtime model decisions', 'No physical state resets after initialization'],
         'known_confounders': ['Trajectory retargeting with original source access; not a matched ten-condition controller comparison']}}
     (directory/'study_case.json').write_bytes(canonical(study)); files['study_case'] = str(directory/'study_case.json')
+    # Bind the actual augmentation inputs/skill and replace inherited study metadata.
+    skill = Path(__file__).parent/'skills/augmentation/SKILL.md'
+    shutil.copyfile(skill, directory/'augmentation_skill.md')
+    (directory/'augmentation_job.json').write_bytes(canonical(job))
+    files['augmentation_skill'] = str(directory/'augmentation_skill.md')
+    files['augmentation_job'] = str(directory/'augmentation_job.json')
+    record = json.loads(Path(files['record']).read_text())
+    record['cases'] = [{'id': condition['case_id'], 'condition': condition,
+        'scene_model_sha256': file_hash(files['model']), 'initial_state_sha256': file_hash(files['initial'])}]
+    assets = {'model': {'path': files['model'], 'sha256': file_hash(files['model'])},
+              'initial': {'path': files['initial'], 'sha256': file_hash(files['initial'])},
+              'source_baseline_request': job['baseline_request'], 'condition': condition}
+    (directory/'assets.json').write_bytes(canonical(assets)); files['augmentation_assets'] = str(directory/'assets.json')
+    record['physics']['asset_and_initial_state_manifest'] = files['augmentation_assets']
+    record['pipeline']['skill_versions_and_hashes'].append({'path': files['augmentation_skill'], 'sha256': file_hash(files['augmentation_skill'])})
+    record['pipeline']['augmentation'] = {'job': files['augmentation_job'], 'job_sha256': file_hash(files['augmentation_job']),
+        'case_id': condition['case_id'], 'entrypoint': 'python -m humanoid_mimicgen.augmentation',
+        'execution_model_calls': 0, 'orchestration_model_calls': 'recorded separately in agent session if used'}
+    record['pipeline']['allowed_retry_changes'] = 'Existing frozen workflow recovery only; no online model changes'
+    record['preflight']['evidence_sha256'].update({files[k]: file_hash(files[k]) for k in
+        ('augmentation_assets', 'augmentation_job', 'augmentation_skill')})
+    Path(files['record']).write_bytes(canonical(record))
     request['strategy_root'] = str(Path(job['output_root'])/'strategies')
     request['experiment_root'] = str(Path(job['output_root'])/'experiments')
     request['strategy']['provenance']['augmentation'] = {'request_id': job['request_id'], 'condition': copy.deepcopy(condition)}

@@ -36,19 +36,23 @@ def process_alive(owner):
 
 
 @contextmanager
-def device_lock():
+def device_lock(wait_s=0.):
     # Shared across stores/worktrees for this Unix account. Descriptor inherited by child.
     path = Path('/tmp')/f'cap-sim-augmentation-{os.getuid()}.lock'
     with path.open('a') as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+        deadline = time.monotonic()+wait_s
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(min(.05, max(0., deadline-time.monotonic())))
+        # Closing this descriptor releases exclusion only after inherited child descriptors close.
+        yield True
+
 
 
 def _reconcile(store, job_id, reason='worker_disappeared', consumed_s=None):
@@ -76,7 +80,13 @@ def reconcile_job(store, job_id):
         return _reconcile(store, job_id)
 
 
-def _execute_job(store_root, job_id):
+def _execute_job(store_root, job_id, supervisor_pid):
+    import ctypes
+    # Kill the physical process if its supervisor is killed, including SIGKILL.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != supervisor_pid:
+        os._exit(1)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     os.setsid()
     store = JobStore(store_root)
     if not store.claim(job_id, process_identity()):
@@ -97,11 +107,19 @@ def _execute_job(store_root, job_id):
             # Never replay an unconfirmed executing stage after an interruption.
             if previous and previous['stage'] == 'awaiting_verification':
                 root = Path(previous['details']['experiment_path'])
-                service.check_contract(root/'experiment.json')
-                from ..workflow.verification import verify
-                result = verify(root)
-                store.record_case(job_id, name, 'verified', {'result': result,
-                    'success': result.get('physical_task_completed') is True, 'ended_at': now()})
+                try:
+                    if not (root/'result.json').is_file():
+                        service.check_contract(root/'experiment.json')
+                        from ..workflow.verification import verify
+                        verify(root)
+                    from .export import export_case
+                    checked = export_case(root, directory/'recovery-verification'/name)
+                    result = json.loads((root/'result.json').read_text())
+                    store.record_case(job_id, name, 'verified', {'result': result,
+                        'success': checked['physical_success'], 'ended_at': now()})
+                except Exception as exc:
+                    store.record_case(job_id, name, 'failed', {'success': False,
+                        'reason_code': exc.code if isinstance(exc, WorkflowError) else 'recovery_verification_failed', 'ended_at': now()})
                 continue
             require(previous is None, 'Unfinished case requires explicit new attempt', 'interrupted')
             verify_inputs(source_hashes); verify_inputs(implementations)
@@ -156,36 +174,54 @@ def _execute_job(store_root, job_id):
                           'error_type': type(exc).__name__, 'ended_at': now(), 'total_wall_s': time.monotonic()-started})
 
 
-def run_job(store, job_id):
-    """Supervise child and enforce wall budget even during native/model loading."""
-    with device_lock() as acquired:
-        if not acquired:
-            return dict(store.get(job_id), worker_busy=True)
-        row = _reconcile(store, job_id)
-        if row['status'] != 'queued':
-            return row
-        remaining = float(row['job']['budgets']['wall_s'])-row['details'].get('budget_used_s', 0.)
-        if remaining <= 0:
-            store.transition(job_id, 'queued', 'failed', {'reason_code': 'wall_budget_exceeded'})
-            return store.get(job_id)
-        clock = time.monotonic()
-        child = mp.get_context('fork').Process(target=_execute_job, args=(str(store.root), job_id))
-        child.start()
-        child.join(remaining)
+def _stop_child(child):
+    if child.pid is None:
+        return
+    if child.is_alive():
+        try:
+            if os.getpgid(child.pid) == child.pid: os.killpg(child.pid, signal.SIGTERM)
+            else: child.terminate()
+        except ProcessLookupError:
+            pass
+        child.join(1)
         if child.is_alive():
-            # Child setsid before claiming; kill its group only after confirming ownership.
-            if os.getpgid(child.pid) == child.pid:
-                os.killpg(child.pid, signal.SIGTERM)
-            else:
-                child.terminate()
-            child.join(1)
-            if child.is_alive():
+            try:
                 if os.getpgid(child.pid) == child.pid: os.killpg(child.pid, signal.SIGKILL)
                 else: child.kill()
-                child.join()
-            return _reconcile(store, job_id, 'wall_budget_exceeded', row['details'].get('budget_used_s', 0.)+time.monotonic()-clock)
-        child.join()
-        return _reconcile(store, job_id, consumed_s=row['details'].get('budget_used_s', 0.)+time.monotonic()-clock)
+            except ProcessLookupError:
+                pass
+    child.join()
+
+
+def run_job(store, job_id):
+    """Supervise child, including device wait and interruption in its wall budget."""
+    row = store.get(job_id)
+    if row['status'] != 'queued': return reconcile_job(store, job_id)
+    remaining = float(row['job']['budgets']['wall_s'])-row['details'].get('budget_used_s', 0.)
+    clock = time.monotonic()
+    with device_lock(wait_s=max(0., remaining)) as acquired:
+        row = store.get(job_id)
+        if row['status'] != 'queued': return row
+        remaining -= time.monotonic()-clock
+        if not acquired or remaining <= 0:
+            store.transition(job_id, 'queued', 'failed', {'reason_code': 'wall_budget_exceeded'})
+            return store.get(job_id)
+        child = mp.get_context('fork').Process(target=_execute_job, args=(str(store.root), job_id, os.getpid()))
+        def interrupted(signum, frame): raise InterruptedError('Supervisor terminated')
+        old_handler = signal.signal(signal.SIGTERM, interrupted)
+        try:
+            child.start(); child.join(remaining)
+            if child.is_alive():
+                _stop_child(child)
+                return _reconcile(store, job_id, 'wall_budget_exceeded', row['details'].get('budget_used_s', 0.)+time.monotonic()-clock)
+            child.join()
+            return _reconcile(store, job_id, consumed_s=row['details'].get('budget_used_s', 0.)+time.monotonic()-clock)
+        except BaseException:
+            _stop_child(child)
+            _reconcile(store, job_id, 'supervisor_interrupted', row['details'].get('budget_used_s', 0.)+time.monotonic()-clock)
+            raise
+        finally:
+            signal.signal(signal.SIGTERM, old_handler)
 
 
 def resume_job(store, job_id, *, background=True):

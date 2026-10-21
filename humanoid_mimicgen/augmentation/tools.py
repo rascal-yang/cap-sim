@@ -36,6 +36,15 @@ def summary(row):
                   for name, c in row['cases'].items()}}
 
 
+def bound_inputs(job):
+    proof = validate_job(job)
+    hashes = dict(proof['input_hashes'])
+    from ..workflow.service import implementation_files
+    hashes.update({str(path): file_hash(path) for path in implementation_files().values()})
+    hashes[str(SKILL.resolve())] = file_hash(SKILL)
+    return hashes
+
+
 def dispatch(name, arguments, context):
     require(name in PARAMETERS, 'Unknown tool', 'unsupported_tool')
     require(isinstance(arguments, dict) and set(arguments) == set(PARAMETERS[name]), 'Tool argument fields')
@@ -51,12 +60,7 @@ def dispatch(name, arguments, context):
     store = context['store']
     if name == 'submit_job':
         require(context.get('skill_read'), 'Read augmentation skill before submitting')
-        proof = validate_job(context['job'])
-        hashes = dict(proof['input_hashes'])
-        # Bind the executing Python and skill versions, not just source data.
-        from ..workflow.service import implementation_files
-        hashes.update({str(path): file_hash(path) for path in implementation_files().values()})
-        hashes[str(SKILL.resolve())] = file_hash(SKILL)
+        hashes = bound_inputs(context['job'])
         submitted = store.submit(context['job'], hashes)
         context['job_id'] = submitted['job_id']
         started = start_job(store, submitted['job_id'])

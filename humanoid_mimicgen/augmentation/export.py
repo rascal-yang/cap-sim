@@ -101,6 +101,7 @@ def export_case(experiment, destination):
                 'Initial state dimensions', 'alignment_error')
         require(len(attempted) >= n and attempted[:n] == commands, 'Attempted/executed prefix mismatch', 'alignment_error')
         times = np.array([x['time_s'] for x in commands], float)
+        require(abs(times[0]) <= 1e-8, 'Missing initial-time anchor', 'alignment_error')
         require(np.allclose(states[:, 0], times+dt, atol=1e-8, rtol=0) and
                 np.allclose([o['time_s'] for o in observations], states[:, 0], atol=1e-8, rtol=0) and
                 (n == 1 or np.allclose(np.diff(times), dt, atol=1e-8, rtol=0)), 'Pre/post timestamps mismatch', 'alignment_error')
