@@ -122,3 +122,42 @@ resample="policy_tick"、joint_group="both_arms"。独立高斯噪声在每次 S
 无噪标签来自带扰动实测状态上的控制器输出，不声称是独立人工纠错标签。
 迁移后的历史输入可用 relocation.rebase_baseline 构建新模板；先验证历史文件字节哈希，
 只改派生副本中的路径，原冻结记录不变。
+
+## 从原始按钮示范启动 API 流程
+
+`bootstrap_agent` 是独立的任务接入入口，现阶段只支持 `G1WholebodyTableButtonPressTeleop`。
+它不要求先构建苹果的 workflow request。真实 API 读取 `skills/contact_bootstrap/SKILL.md`，
+选择源 episode 并调用原始状态检查、SONIC token 物理回放、接触阶段提取、mode1 小范围重定向和导出。
+长任务在 Python 工具内同步执行，不为进度轮询调用 API。
+
+从仓库根目录用系统 Python 3.11+ 启动（运行器会自动切换到已固定的 HUMANO 环境）：
+
+```bash
+python3 scripts/run_contact_bootstrap.py \
+  --config /absolute/path/to/new_experiment/config.json \
+  --provider /absolute/path/to/new_experiment/provider.json \
+  --credentials ../api/openai_config.toml
+```
+
+config 字段：`task`、`dataset`（原始任务目录）、`episodes`（允许尝试的源 episode 列表）、
+`augmentation_xy_m`（包含零偏移的固定条件列表）、`output_root`、`budget`（范围说明）。
+当前试验使用最多三个候选 episode 和五个 XY 条件。正式使用前应显式给定有限列表。
+provider 沿用 Responses 配置，凭据只存在进程环境中。已完成目录再次执行会返回已有结果；
+新试验应使用 `init-experiment` 创建的新目录，不能覆盖旧记录。
+
+本入口保留原任务的接触力与连续保持判据。原始 token replay 不通过 encoder；
+mode1 使用示范腿部 q/dq、躯干和双腕参考，按钮独立移动，机器人初态不移动。
+当前重定向执行整条示范；阶段标注作为独立产物保存，尚未拼接新规划的导航前缀。
+未实现按钮任务内部的纠偏 retry，不借用苹果抓取恢复条件。输出不是 SONIC token 训练文件。
+`dataset_index.json` 包含成功和失败的物理状态转换；`REPORT.md`、`metrics.json` 和 `api/`
+分别记录结果、耗时和真实 API 请求/响应与 usage。未做视觉验收时 training_ready=false。
+
+可选 `hold_tail: true` 会在每个条件末尾增加一段由原生 `hold_steps × reward_dt`
+计算的保持时间。token 模式重复最后 token，mode1 固定最后 Cartesian 目标并将参考速度置零。
+这是明确声明的接触补全，不是严格原始 replay。按钮首次接入实测：精确原始 replay 能对齐，
+但源片段未满足当前奖励采样周期下的保持时长；补全后原 token 成功，而 mode1 五例均未成功。
+不能将工具链已执行完成等同于成功增广。
+
+网关 upstream_error、请求不可用及缺少终止事件的断流最多重试两次；错误响应中的工具不执行。
+恢复会复用已保存的成功工具输出。已开始但没有结果的物理调用禁止静默重跑。
+每次网络尝试都记录时长和 usage；失败响应缺少 usage 时总用量记未知，同时提供 known_usage。
