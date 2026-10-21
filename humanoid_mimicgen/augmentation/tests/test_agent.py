@@ -141,3 +141,26 @@ def test_timeout_attempt_usage_remains_unknown_after_retry(tmp_path, monkeypatch
     result=agent.run_agent(path,config,store,transport=Scripted([valid(call('submit','submit_job',{})),valid()]))
     assert result['api_calls']==4
     assert result['usage'] is None
+
+
+def test_provider_sends_explicit_reasoning_effort(monkeypatch):
+    from humanoid_mimicgen.augmentation import provider
+    config = {'protocol': 'responses', 'base_url': 'https://api.example.test/v1', 'model': 'gpt-6-astra',
+              'key_env': 'AUGMENT_TEST_KEY', 'timeout_s': 5, 'max_rounds': 6,
+              'max_output_tokens': 2048, 'wall_s': 60, 'reasoning_effort': 'low'}
+    monkeypatch.setenv('AUGMENT_TEST_KEY', 'test-only-secret')
+    captured = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, limit): return json.dumps({'model': 'gpt-6-astra', 'status': 'completed', 'output': []}).encode()
+    class Opener:
+        def open(self, request, timeout):
+            captured.append(json.loads(request.data))
+            return Response()
+    monkeypatch.setattr(provider.urllib.request, 'build_opener', lambda *args: Opener())
+    ResponsesProvider(config).respond([], [], 'test')
+    assert captured[0]['reasoning'] == {'effort': 'low'}
+    assert 'test-only-secret' not in json.dumps(captured)
+    config['reasoning_effort'] = 'made-up'
+    with pytest.raises(WorkflowError): ResponsesProvider(config)

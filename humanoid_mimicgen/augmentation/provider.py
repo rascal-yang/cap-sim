@@ -12,8 +12,10 @@ FIELDS = {'protocol', 'base_url', 'model', 'key_env', 'timeout_s', 'max_rounds',
 
 def validate_config(config):
     canonical(config)
-    require(isinstance(config, dict) and set(config) == FIELDS, 'Provider configuration fields')
+    require(isinstance(config, dict) and FIELDS <= set(config) <= FIELDS | {'reasoning_effort'}, 'Provider configuration fields')
     require(config['protocol'] == 'responses', 'Unsupported API protocol')
+    if 'reasoning_effort' in config:
+        require(config['reasoning_effort'] in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'), 'Reasoning effort')
     url = urlsplit(config['base_url'])
     require(url.scheme == 'https' and url.netloc and not any((url.username, url.password, url.query, url.fragment)),
             'HTTPS endpoint without embedded credentials required')
@@ -40,6 +42,8 @@ class ResponsesProvider:
         require(bool(key), 'Configured API credential absent', 'api_unavailable')
         body = {'model': c['model'], 'input': input_items, 'tools': tools, 'instructions': instructions,
                 'store': False, 'parallel_tool_calls': False, 'max_output_tokens': c['max_output_tokens']}
+        if 'reasoning_effort' in c:
+            body['reasoning'] = {'effort': c['reasoning_effort']}
         request = urllib.request.Request(c['base_url'].rstrip('/')+'/responses', data=canonical(body),
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+key})
         try:
