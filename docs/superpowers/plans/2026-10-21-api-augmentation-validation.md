@@ -6,7 +6,7 @@
 
 验收依据：`/home/kinetra-4090-01/code/zijian/experiments/20261021_1142_api_augmentation_final/REPORT.md`。61+53+135+71=320 项测试通过。最终物理集成两例：原起点失败、back20 成功；源实测状态与历史基线最大差均 0.0。全部导出，运行 72.107 秒；重复调用约 2.597 秒且无新物理/外部 API。真实物理执行提交 ee7e8ee，后续导出视频索引补充仅做单元和零物理步离线验证，完整代码提交见 Git 历史。
 
-尚未完成：真实 API 联调与实际 token/费用测量。没有 API 凭据；当前测试注入脚本化响应，不能宣称全目标已达成。视觉训练验收未执行，保持 false；不导出伪造 SONIC token。
+首次本地验收时尚未完成：真实 API 联调与实际 token/费用测量。没有 API 凭据；当前测试注入脚本化响应，不能宣称全目标已达成。视觉训练验收未执行，保持 false；不导出伪造 SONIC token。
 
 ## 评审与修复
 
@@ -25,3 +25,10 @@
 ## 接入
 
 参见 `humanoid_mimicgen/augmentation/README.md` 和 examples 下两个 JSON。API 配置需要明确 protocol=responses、base_url、model、key_env；密钥通过该环境变量提供，不写入仓库和日志。其他协议需明确添加适配器，不能静默替换。
+
+
+## 真实 API 验收（20261021_1607_api_augmentation_live_final）
+
+用户指定 api/openai_config.toml、gpt-6-astra low。执行版本 b79cf08：补充可选 reasoning_effort、流式 Responses 解析、明确 User-Agent 与环境变量请求头；其他路线和控制逻辑不变。最终 5 轮响应均报告 gpt-6-astra/low，工具调用 read_skill→validate_job→submit_job→get_case，完成两例物理执行及导出。输入 6766、输出 347、合计 7113 tokens；API 等待 31.696 秒，端到端 106.841 秒，本地 worker 72.106 秒。物理 1/2 成功，两例状态与历史逐项相同。重复请求 2.563 秒，新增 API/物理均 0。322 项测试通过。
+
+完整报告：/home/kinetra-4090-01/code/zijian/experiments/20261021_1607_api_augmentation_live_final/REPORT.md。真实 API 联调已完成；费用尚无网关价格/账单依据，保持未知。此前排障请求单独记账，总调用 10，已知 usage 11242 tokens，另 4 次 usage 未知；不把 7113 当整个排障过程总用量。视觉训练验收仍未执行。
