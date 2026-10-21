@@ -16,10 +16,19 @@ def main(argv=None):
         if name == 'agent': p.add_argument('--provider', required=True)
     for name in ('worker', 'inspect', 'resume', 'export'):
         p = sub.add_parser(name); p.add_argument('--store', required=True); p.add_argument('--job-id', required=True)
+    p = sub.add_parser('init-experiment'); p.add_argument('--root', default='../experiments'); p.add_argument('--description', default='api_augmentation')
+    p = sub.add_parser('index-history'); p.add_argument('--root', default='../experiments')
     args = parser.parse_args(argv)
     try:
         with diagnostics_to_stderr():
-            if args.command == 'validate':
+            if args.command == 'init-experiment':
+                from .records import create_record
+                path = create_record(args.root, args.description)
+                result = {'experiment_id': path.name, 'path': str(path.absolute()), 'physics_steps': 0}
+            elif args.command == 'index-history':
+                from .records import index_history
+                result = index_history(args.root)
+            elif args.command == 'validate':
                 result = validate_job(load_job(args.job))
                 result = {k: v for k, v in result.items() if k != 'input_hashes'} | {'bound_files': len(result.get('input_hashes', {}))}
             else:

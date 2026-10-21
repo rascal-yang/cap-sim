@@ -1,6 +1,6 @@
 # 统一实验记录规范
 
-每次物理实验必须先完成 `experiment.json`，从 [JSON模板](experiment-record.template.json)复制填写。目录和报告使用北京时间 `YYYYMMDD_HHMM_名称`；同分钟重名加序号。模板中的 null 必须填写或明确说明不适用，不能作为已通过检查的证据。
+每次物理实验必须先完成 `experiment.json`，从 [JSON模板](experiment-record.template.json)复制填写。新批次目录使用 `experiments/YYYY-MM/DD/YYYYMMDD_HHMM_<description>/`（月／日／单次实验），子案例证据归属各批次。历史目录原位置保留，可通过月／日符号链接访问；未知日期不按修改时间推断。目录编号和报告使用北京时间 `YYYYMMDD_HHMM_名称`；同分钟重名加序号。模板中的 null 必须填写或明确说明不适用，不能作为已通过检查的证据。
 
 ## 执行前冻结
 

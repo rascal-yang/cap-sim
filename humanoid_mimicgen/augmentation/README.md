@@ -6,6 +6,19 @@
 
 ## 快速使用
 
+新批次先创建按月／日归档的目录（北京时间、保留完整实验 ID）：
+
+```bash
+scripts/humano_python.sh -m humanoid_mimicgen.augmentation init-experiment \
+  --root ../experiments --description api_augmentation
+```
+
+返回路径形如 `experiments/2026-10/21/20261021_1607_api_augmentation`。
+将返回的 path 用作 job.output_root，experiment_id 用作 request_id，job/provider 配置也保存在其中。
+批次内部 case 的物理证据仍保存在该批次自己的 experiments 子目录，不改变旧工作流。
+`index-history --root ../experiments` 为历史目录建立月／日符号链接，不搬动或修改原始记录。
+目录名无法确定日期的项目列在 unclassified，不按文件修改时间猜测。
+
 从当前分支仓库根目录执行。示例引用本机已有的苹果示范；迁移机器时替换
 baseline_request 和 output_root。路径相对 JSON 所在目录解析。
 
