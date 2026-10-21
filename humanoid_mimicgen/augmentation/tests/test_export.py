@@ -121,3 +121,13 @@ def test_prefix_truncated_trace_cannot_use_initial_as_prestate(tmp_path):
     for key in ('physics_steps','recorded_steps','completed_commands'): a[key]=1
     p.write_bytes(canonical(a))
     with pytest.raises(WorkflowError,match='alignment'): export_case(root,tmp_path/'export')
+
+
+def test_optional_video_is_copied_hashed_and_not_visually_approved(tmp_path):
+    root=trace(tmp_path); video=root/'video'; video.mkdir()
+    # Deliberately not a decodable video: export records evidence, never approves visual quality.
+    (video/'external.mp4').write_bytes(b'unreviewed-video-placeholder')
+    result=export_case(root,tmp_path/'export')
+    item=result['videos']['external']
+    assert file_hash(tmp_path/'export'/item['path'])==file_hash(video/'external.mp4')==item['sha256']
+    assert item['visual_acceptance']=='unknown' and not result['training_ready']

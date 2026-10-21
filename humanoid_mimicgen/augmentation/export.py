@@ -78,6 +78,9 @@ def export_case(experiment, destination):
     paths = [root/'experiment.json', root/'experiment.sha256', root/'native_preflight.json', root/'result.json']
     paths += [out/name for name in ('actual_initial.npz', 'states.npz', 'commands.json', 'attempted_commands.json',
                                    'observations.json', 'events.json', 'execution_audit.json')]
+    videos = {name: root/'video'/(name+'.mp4') for name in ('external', 'ego') if (root/'video'/(name+'.mp4')).is_file()}
+    paths += list(videos.values())
+    paths += [root/'video'/name for name in ('audit.json', 'frame_mapping.json') if (root/'video'/name).is_file()]
     try:
         sources = {str(p): file_hash(p) for p in paths}
         require(file_hash(root/'experiment.json') == (root/'experiment.sha256').read_text().strip(),
@@ -128,7 +131,9 @@ def export_case(experiment, destination):
             'training_ready': result.get('training_ready') is True,
             'research_kind': 'trajectory_retargeting', 'original_sequences_accessible': True,
             'alignment': 'qpos/qvel before action; next_qpos/next_qvel after one physics step',
-            'physics_steps_in_exporter': 0, 'visual_acceptance': 'unknown'}
+            'physics_steps_in_exporter': 0, 'visual_acceptance': 'unknown',
+            'videos': {name: {'path': 'evidence/video/'+p.name, 'sha256': sources[str(p)],
+                              'visual_acceptance': 'unknown'} for name, p in videos.items()}}
         # A result flag alone is not a visual acceptance certificate.
         summary['training_ready'] = False
         destination.parent.mkdir(parents=True, exist_ok=True)
