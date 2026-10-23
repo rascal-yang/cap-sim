@@ -1,5 +1,7 @@
 # API 自主探索
 
+> 历史实验路线，已退出默认编排。当前稳定路线见 [stable-seed-first.md](stable-seed-first.md)，此文保留用于解释旧实验。
+
 入口仍为 `scripts/run_contact_batch.py` / `run_contact_review.py`，只改独立 contact 路线。
 每个任务只需要 `task`、`dataset`、成功 original-token `baseline` 和绑定它的 API `annotation`；可指定 `baseline_inspection`。
 旧配置的 `failed_case`、`diagnostic_review`、`prior_criteria_decision` 不再进入初始证据或复用审查。

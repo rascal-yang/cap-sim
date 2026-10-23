@@ -50,7 +50,7 @@ def test_retry_receives_review_history_checkpoints_and_fresh_budget(tmp_path,mon
     monkeypatch.setattr(c,'verify_origin',lambda p:{'decision':params})
     monkeypatch.setattr(c,'require_prerequisites',lambda *a:None)
     monkeypatch.setattr(c,'validate_binding',lambda *a:None)
-    monkeypatch.setattr(c,'acceptance_sources',lambda *a:{'code':'native','hashes':{}})
+    monkeypatch.setattr(c,'compare',lambda *a:{'replay':{'robot_bodies':['hand'],'joints':[{'name':'elbow'}]}})
     monkeypatch.setattr(c,'configured_provider',lambda *a:SimpleNamespace(config={}))
     monkeypatch.setattr(c,'check_frozen',lambda *a:None)
     monkeypatch.setattr(c,'inspect_contact_case',lambda *a:{'current':True,'robot_bodies':['hand'],'joints':[{'name':'elbow'}]})
@@ -85,4 +85,4 @@ def test_retry_receives_review_history_checkpoints_and_fresh_budget(tmp_path,mon
 
     assert 'diagnostic' not in contexts[0]['evidence']
     assert contexts[0]['previous_decision'] is None
-    assert set(contexts[0]['initial_parameters'])=={'episode','contact_start','contact_end'}
+    assert contexts[0]['initial_parameters']['contact_start']==2

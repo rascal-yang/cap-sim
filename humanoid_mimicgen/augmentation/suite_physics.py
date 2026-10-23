@@ -159,7 +159,7 @@ def uses_original_token(mode, index, prefix):
     return mode == 'original_token' or (mode == 'token_prefix_mode1' and index < prefix)
 
 
-def physical_case(dataset,episode,root,mode,shift=(0,0),hold_tail=False,decision_path=None,contact_control=False):
+def physical_case(dataset,episode,root,mode,shift=(0,0),hold_tail=False,decision_path=None,contact_control=False,seed_evidence_path=None):
     """One frozen rollout or explicitly declared checkpoint branch."""
     import mujoco
     from cap_sim.backends.native_sonic import Sonic
@@ -170,10 +170,10 @@ def physical_case(dataset,episode,root,mode,shift=(0,0),hold_tail=False,decision
     if decision_path is None:raise ValueError("API decision evidence required")
     with device_lock(wait_s=60) as acquired:
         if not acquired:raise RuntimeError("Physical worker busy")
-        return _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control)
+        return _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control,seed_evidence_path)
 
 
-def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control=False):
+def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control=False,seed_evidence_path=None):
     from ..cli import create_experiment
     folder=create_experiment(Path(root)/'experiments',Path(dataset).name.replace('G1Wholebody','').replace('Teleop','').lower()+'_'+mode+('_hold' if hold_tail else ''));start=now();tick=time.monotonic()
     b,df,files,task=open_source(dataset,episode,folder,shift)
@@ -236,6 +236,8 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
         bound=[Path(decision_path),Path(decision['origin']['request']),Path(decision['origin']['response'])]+list(files.values())+sources+[folder/n for n in ('runtime.json','physics.json','task.json','scene.mjb','initial.npz','comparison_diff.json')]+list(MODELS.glob('policy/release/*.onnx'))+[MODELS/'planner/target_vel/V2/planner_sonic.onnx']
         if adapter:bound += adapter.evidence+[folder/'contact_contract.json']
         if branch:bound += branch['evidence']
+        seed_evidence=json.loads(Path(seed_evidence_path).read_text()) if seed_evidence_path else None
+        if seed_evidence:bound += [Path(seed_evidence_path)]+[Path(p) for p in seed_evidence['evidence_files']]
         snapshot=folder/'source_snapshot';snapshot.mkdir()
         import shutil
         for i,p in enumerate(sources):shutil.copy2(p,snapshot/f'{i:03d}_{p.name}')
@@ -257,6 +259,9 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
         r['budget'].update(attempts_per_case=1,recovery_attempts=0,simulation_seconds_per_attempt=len(df)*.02,feedback_calls=0)
         r['metrics'].update(target_definition='original source wrist pose + object XY shift for Cartesian cases',sampling_and_alignment='source pre-control row; action then four 5ms steps; paired transitions exported',tracking_error_definition='Euclidean actual wrist minus desired world wrist, sampled before policy tick',endpoint_error_definition='last executed reference tracking error; coverage reported separately',orientation_error_definition='not measured',base_drift_definition='final root XY minus source initial XY',failure_truncation_rule='retain failed prefix, never zero-fill')
         r['preflight'].update(passed=True,comparison_diff_path=str(folder/'comparison_diff.json'),evidence_paths=[str(p) for p in bound],evidence_sha256={str(p):file_hash(p) for p in bound})
+        if seed_evidence:
+            r['pipeline']['decision_reuse']={'source_case':seed_evidence['case'],'source_decision':seed_evidence['decision_path'],'source_api_review':seed_evidence['source_review'],'evidence_path':str(seed_evidence_path),'new_api_plan':False}
+            r['pipeline']['external_model_calls']='No new API planning: reexecute immutable prior API decision and require fresh physical validation'
         if adapter:
             r['purpose']['planned_changes'].append(adapter.contract())
             r['control']['stage_interfaces'][-1]['joint_residual_interface']=adapter.contract()
