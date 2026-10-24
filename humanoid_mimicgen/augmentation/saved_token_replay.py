@@ -29,4 +29,4 @@ def load_source(case,frames,task,episode,shift):
         raise ValueError('Saved-token source identity/coverage mismatch')
     tokens=extract_tokens(np.load(case/'execution/controller.npz')['records'],frames)
     names=['result.json','experiment.json','experiment.sha256','scene.mjb','initial.npz','physics.json','execution/controller.npz','execution/trajectory.npz']
-    return tokens,r,[case/n for n in names]+[p for p in [case/'execution/contact_control.json',case/'execution/preencoder.json'] if p.exists()]
+    return tokens,r,[case/n for n in names]+[p for p in [case/'execution/contact_control.json',case/'execution/preencoder.json',case/'execution/hand_commands.npz',case/'execution/finger_control.json'] if p.exists()]
