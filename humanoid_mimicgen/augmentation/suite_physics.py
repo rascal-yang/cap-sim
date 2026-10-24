@@ -122,7 +122,7 @@ def decode(s,d,token):
     return s.default+s.scale*raw[s.reverse]
 
 
-def encode_reference(s,d,q,v,poses,index,shift):
+def encode_reference(s,d,q,v,poses,index,shift,pose_frame=None):
     from cap_sim.backends.native_sonic import rot,quat
     e=np.zeros(1762,np.float32);e[0]=1
     ids=np.minimum(index+np.arange(10)*5,len(q)-1);anchor=rot(q[index,3:7]);actual=rot(d.qpos[3:7])
@@ -130,7 +130,8 @@ def encode_reference(s,d,q,v,poses,index,shift):
     e[661:781]=q[ids][:,s.qids[:12]].reshape(-1);e[781:901]=v[ids][:,s.vids[:12]].reshape(-1)
     ps=[];qs=[]
     for j,offset in enumerate(([.18,-.025,0],[.18,.025,0],[0,0,.35])):
-        p=poses[index,j,:3].copy();r=rot(poses[index,j,3:])
+        frame=poses[index] if pose_frame is None else pose_frame
+        p=frame[j,:3].copy();r=rot(frame[j,3:])
         if j<2:p[:2]+=shift
         ps.extend(anchor.inv().apply(p+r.apply(offset)-d.qpos[:3]));qs.extend(quat(anchor.inv()*r))
     e[901:910]=ps;e[910:922]=qs
@@ -148,6 +149,7 @@ def check_frozen(folder):
 
 
 def token_prefix_steps(mode, contact_start, frames):
+    if mode == 'saved_token_replay': return 0
     if mode == 'original_token': return frames
     if mode == 'cartesian_source_legs': return 0
     if mode != 'token_prefix_mode1' or not isinstance(contact_start, int) or not 0 <= contact_start < frames:
@@ -159,21 +161,23 @@ def uses_original_token(mode, index, prefix):
     return mode == 'original_token' or (mode == 'token_prefix_mode1' and index < prefix)
 
 
-def physical_case(dataset,episode,root,mode,shift=(0,0),hold_tail=False,decision_path=None,contact_control=False,seed_evidence_path=None):
+def physical_case(dataset,episode,root,mode,shift=(0,0),hold_tail=False,decision_path=None,contact_control=False,seed_evidence_path=None,saved_token_case=None,preencoder=False):
     """One frozen rollout or explicitly declared checkpoint branch."""
     import mujoco
     from cap_sim.backends.native_sonic import Sonic
     from humano.mt.base import MotorCommand
     from humano.core.action import ActionCmd
     from .worker import device_lock
-    if mode not in ('original_token','cartesian_source_legs','token_prefix_mode1'):raise ValueError('Unsupported explicit mode')
+    if preencoder and (contact_control or saved_token_case or mode!='token_prefix_mode1'):raise ValueError('Preencoder requires mode1 and forbids saved replay or post-decoder adapter')
+    if (mode=='saved_token_replay') != bool(saved_token_case) or (saved_token_case and contact_control):raise ValueError('Saved-token mode requires source and forbids residual controller')
+    if mode not in ('original_token','cartesian_source_legs','token_prefix_mode1','saved_token_replay'):raise ValueError('Unsupported explicit mode')
     if decision_path is None:raise ValueError("API decision evidence required")
     with device_lock(wait_s=60) as acquired:
         if not acquired:raise RuntimeError("Physical worker busy")
-        return _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control,seed_evidence_path)
+        return _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control,seed_evidence_path,saved_token_case,preencoder)
 
 
-def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control=False,seed_evidence_path=None):
+def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorCommand,ActionCmd,decision_path,contact_control=False,seed_evidence_path=None,saved_token_case=None,preencoder=False):
     from ..cli import create_experiment
     folder=create_experiment(Path(root)/'experiments',Path(dataset).name.replace('G1Wholebody','').replace('Teleop','').lower()+'_'+mode+('_hold' if hold_tail else ''));start=now();tick=time.monotonic()
     b,df,files,task=open_source(dataset,episode,folder,shift)
@@ -194,6 +198,11 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
         tail_s=params_api['tail_s'];guard=validate_guard(params_api.get('safety_guard'))
         if tail_s:df=extend_contact_tail(df,round(tail_s/.02),.02,.02)
         hold_tail=bool(tail_s)
+        saved_tokens=None;saved_result=None;saved_bound=[]
+        if saved_token_case:
+            from .saved_token_replay import load_source
+            saved_tokens,saved_result,saved_bound=load_source(saved_token_case,len(df),Path(dataset).name,episode,shift)
+            if params_api.get('resume',{}).get('kind')=='checkpoint':raise ValueError('Token replay requires full initial-state rollout')
         prefix=token_prefix_steps(mode,params_api['contact_start'],len(df))
         if branch_frame>=len(df):raise ValueError('Rollback frame beyond branch end')
         native_initial={k:copy.deepcopy(v) for k,v in vars(b.e.task).items() if k.startswith('_init_') or k.endswith('_hold_count')}
@@ -203,7 +212,11 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
         acceptance=native_acceptance(b.e.task)
         if b.reward_stride!=4:raise ValueError('Unsupported native reward cadence')
         s=Sonic(b.m,b.robot,MODELS,b.initial);q,v,poses=source_poses(b,df)
-        adapter=None
+        adapter=None;preadapter=None
+        if preencoder:
+            from .encoder_wrist import EncoderWrist
+            if params_api['contact_control']['joints'] or any(params_api['wrist_delta_m']):raise ValueError('Only preencoder right-wrist corrections permitted')
+            preadapter=EncoderWrist(b,s,params_api)
         if contact_control:
             from .contact_control import ContactController
             ref=json.loads((Path(params_api['reference_case'])/'result.json').read_text())
@@ -234,6 +247,11 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
         write_new(folder/'comparison_diff.json',{'object_delta_xy_m':list(shift),'robot_initial_changed':bool(branch),'mode':mode,'hold_tail':hold_tail,'tail_policy_ticks':len(df)-source_frames,'api_parameters':params_api,'source_provider':'historical gpu; current CPU','cartesian_reference':'saved measured wrist poses and saved leg references, not original encoder commands'})
         sources=list((REPO/'humanoid_mimicgen/augmentation').glob('*.py'))+[REPO/'src/cap_sim/backends/humano.py',REPO/'src/cap_sim/backends/native_sonic.py',REPO/'humanoid_mimicgen/privileged.py',case_skill]+native_sources
         bound=[Path(decision_path),Path(decision['origin']['request']),Path(decision['origin']['response'])]+list(files.values())+sources+[folder/n for n in ('runtime.json','physics.json','task.json','scene.mjb','initial.npz','comparison_diff.json')]+list(MODELS.glob('policy/release/*.onnx'))+[MODELS/'planner/target_vel/V2/planner_sonic.onnx']
+        bound += saved_bound
+        if preadapter:
+            bound += preadapter.evidence
+            comparison_case=Path(params_api['baseline_case'])
+            bound += [comparison_case/n for n in ('scene.mjb','physics.json','initial.npz','result.json')]
         if adapter:bound += adapter.evidence+[folder/'contact_contract.json']
         if branch:bound += branch['evidence']
         seed_evidence=json.loads(Path(seed_evidence_path).read_text()) if seed_evidence_path else None
@@ -275,6 +293,26 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
             r['physics']['action_permissions']='one explicit checkpoint restoration at branch initialization; actuator commands only thereafter'
             r['control']['checkpoint_initialization']=params_api['resume']
             r['budget']['recovery_attempts']=1
+        if saved_token_case:
+            src=Path(saved_token_case)
+            if file_hash(folder/'scene.mjb')!=file_hash(src/'scene.mjb') or json.loads((folder/'physics.json').read_text())!=json.loads((src/'physics.json').read_text()):raise ValueError('Replay scene/physics mismatch')
+            with np.load(folder/'initial.npz') as x,np.load(src/'initial.npz') as y:
+                if set(x.files)!=set(y.files) or any(not np.array_equal(x[k],y[k]) for k in x.files):raise ValueError('Replay initial state mismatch')
+            stages[0].update(mode='saved_token_replay',lower_body_interface='saved token directly into original SONIC decoder',upper_body_interface='same decoder; no post-decoder residual; source hand commands',target_source={'case':str(src),'controller_sha256':file_hash(src/'execution/controller.npz')},native_prefix_source_and_hash={'source':str(src/'execution/controller.npz'),'sha256':file_hash(src/'execution/controller.npz'),'duration_s':saved_result['original_token_steps']*.02},handoff_rule='all saved tokens; no encoder calls, mode transitions, or history resets')
+            r['purpose'].update(hypothesis='Can newly generated data replay through saved token plus original hand commands and base PD alone?',baseline_paths=[str(src)],planned_changes=['bypass encoder and replay saved tokens','remove all post-decoder joint residuals and PD scaling'],known_confounders=[])
+            r['pipeline'].update(external_model_calls='zero new API calls; user-authorized diagnostic using historical parameters only',allowed_retry_changes=[],feedback_and_reflection_rules='decoder proprioception only; no contact correction',entrypoint='saved-token diagnostic through suite_physics.physical_case')
+            r['control']['saved_token_replay']={'encoder_calls':0,'planner_calls':0,'residual_calls':0,'base_pd':True,'token_dimension':saved_tokens.shape[1]}
+            r['physics']['acceptance_thresholds'].pop('reviewed_shadow',None)
+            if 'contact_control' in params_api:r['physics']['safety_gates']['selected_contact_force_N']=params_api['contact_control']['force_stop_N']
+        if preadapter:
+            if file_hash(folder/'scene.mjb')!=file_hash(comparison_case/'scene.mjb') or json.loads((folder/'physics.json').read_text())!=json.loads((comparison_case/'physics.json').read_text()):raise ValueError('Preencoder baseline scene or physics mismatch')
+            with np.load(folder/'initial.npz') as x,np.load(comparison_case/'initial.npz') as y:
+                if set(x.files)!=set(y.files) or any(not np.array_equal(x[k],y[k]) for k in x.files):raise ValueError('Preencoder baseline initial mismatch')
+            r['purpose'].update(hypothesis='Right-wrist encoder-only correction can press button and yield independently replayable tokens',baseline_paths=[str(comparison_case),str(preadapter.source)],known_confounders=[],planned_changes=['right wrist pre-encoder reference correction only','remove post-decoder joint target and gain corrections',params_api['preencoder']])
+            r['control']['stage_interfaces'][-1]['preencoder_right_wrist']={'parameters':params_api['preencoder'],'reference':str(preadapter.source),'force_sensor':'native downward button contact force at pre-control 50Hz','rotation':'world left-multiplied rotation vector; quaternions wxyz','active':'contact_start through end; original token prefix unchanged','post_decoder_changes':False,'fixed_PD':True}
+            r['pipeline'].update(feedback_and_reflection_rules='API plans bounded right wrist reference; local force feedback modifies encoder input only',allowed_retry_changes=['new API preencoder parameters under a new frozen case'])
+            r['physics']['safety_gates']['selected_contact_force_N']=params_api['contact_control']['force_stop_N']
+            r['metrics']['tracking_error_definition']='Legacy source wrist reference diagnostic only; corrected right wrist reference is in execution/preencoder.json and encoder log'
         write_new(folder/'experiment.json',r);(folder/'experiment.sha256').write_text(file_hash(folder/'experiment.json'));check_frozen(folder)
         out=folder/'execution';out.mkdir();prep=time.monotonic()-tick;simtick=time.monotonic();states=[];commands=[];nextstates=[];metrows=[];controllers=[];failure=None;ever=False;initial_time=float(b.d.time);errors=[];checkpoint_states=[];checkpoint_metadata=[]
         if branch:
@@ -288,9 +326,12 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
                 from .retry_state import capture
                 state,metadata=capture(b,s,adapter,i,ever);checkpoint_states.append(state);checkpoint_metadata.append(metadata)
             original=uses_original_token(mode,i,prefix)
-            if original:token=np.asarray(row['action.motion_token'],np.float32);enc=np.zeros(1762,np.float32)
-            else:token,enc=encode_reference(s,b.d,q,v,poses,i,np.asarray(shift))
-            target=decode(s,b.d,token);controllers.append(np.r_[b.d.time,(-1 if original else 1),token,enc,target]);errors.append([float(np.linalg.norm(b.d.xpos[b.left]-poses[i,0,:3]-np.r_[shift,0])),float(np.linalg.norm(b.d.xpos[b.right]-poses[i,1,:3]-np.r_[shift,0]))])
+            if saved_tokens is not None:token=saved_tokens[i];enc=np.zeros(1762,np.float32)
+            elif original:token=np.asarray(row['action.motion_token'],np.float32);enc=np.zeros(1762,np.float32)
+            else:
+                pose_frame=preadapter.apply(poses[i],i) if preadapter else None
+                token,enc=encode_reference(s,b.d,q,v,poses,i,np.asarray(shift),pose_frame)
+            target=decode(s,b.d,token);controllers.append(np.r_[b.d.time,(-2 if saved_tokens is not None else (-1 if original else 1)),token,enc,target]);errors.append([float(np.linalg.norm(b.d.xpos[b.left]-poses[i,0,:3]-np.r_[shift,0])),float(np.linalg.norm(b.d.xpos[b.right]-poses[i,1,:3]-np.r_[shift,0]))])
             kp,kd=s.kp,s.kd
             if adapter:target,kp,kd=adapter.apply(target,i)
             for sub in range(4):
@@ -307,11 +348,16 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
                 elif any(w.number for w in b.d.warning):failure='simulation_warning'
                 elif b.contacts()['robot_table_N']>50:failure='table_collision'
                 elif adapter and adapter.force_stop():failure='selected_contact_force_limit'
+                elif (saved_token_case or preadapter) and 'contact_control' in params_api:
+                    from .contact_control import contact_force
+                    c=params_api['contact_control'];f,_=contact_force(b.m,b.d,c['contact_bodies'],b.object_ids.get('target',b.object_ids.get('articulated')))
+                    if f>c['force_stop_N']:failure='selected_contact_force_limit'
                 if failure:break
             if failure:break
         simwall=time.monotonic()-simtick
         np.savez_compressed(out/'trajectory.npz',state=np.asarray(states),next_state=np.asarray(nextstates),commands=np.asarray(commands),wrist_error_m=np.asarray(errors))
         np.savez_compressed(out/'controller.npz',records=np.asarray(controllers));write_new(out/'metrics.json',metrows)
+        if preadapter:write_new(out/'preencoder.json',preadapter.logs)
         if adapter:adapter.save(out);adapter.hold=0;adapter.shadow_ever=False
         # Independently reconstruct contact force and native hold from saved new states.
         for key,value in native_initial.items():setattr(b.e.task,key,copy.deepcopy(value))
@@ -336,6 +382,8 @@ def _physical_case(dataset,episode,root,mode,shift,hold_tail,mujoco,Sonic,MotorC
             result['token_alone_replays_execution']=False
         if contact_control:
             result.update(executed_physics_steps=len(states)-branch_frame*4,inherited_physics_steps=branch_frame*4,simulation_s=(len(states)-branch_frame*4)*.005,checkpoint_restorations=int(branch is not None),branch_start_frame=branch_frame,fully_new_rollout=branch is None,native_success_before_branch=bool(branch and branch['metadata'][branch_frame]['ever']),rollback=params_api.get('resume'),lineage=([{'case':str(branch['case']),'prefix_policy_frames':branch_frame,'manifest_sha256':file_hash(branch['case']/'execution/checkpoint_manifest.json')}] if branch else []))
+        if preadapter:result.update(preencoder_parameters=params_api['preencoder'],encoder_calls=len(preadapter.logs),planner_calls=0,post_decoder_residual_calls=0,control_variant='mode1_preencoder_right_wrist_fixed_pd',token_alone_replays_execution='pending_independent_replay')
+        if saved_token_case:result.update(saved_token_source=str(saved_token_case),saved_token_steps=len(controllers),encoder_calls=0,planner_calls=0,post_decoder_residual_calls=0,control_variant='saved_token_base_pd_source_hands',source_original_token_prefix_steps=saved_result['original_token_steps'])
         result['native_acceptance']=acceptance;result['evidence_summary']=summarize_metrics(metrows);result['decision_path']=str(decision_path)
         write_new(out/'execution_audit.json',result);write_new(folder/'result.json',result)
         if adapter:
