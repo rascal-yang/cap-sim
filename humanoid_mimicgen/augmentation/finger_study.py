@@ -31,31 +31,40 @@ def brief(case):
   f=json.loads((case/'execution/finger_control.json').read_text());e['finger_samples']=[f[i] for i in picks if i<len(f)]
  return e
 
-def validate(d,fixed,names,frames):
+def validate(d,fixed,names,frames,joint_wrist=False):
  if set(d)!=set(SCHEMA):raise ValueError('Unexpected plan fields')
  validate_decision({k:d[k] for k in PROPERTIES},[fixed['episode']]);validate_fingers(d['finger_control'],names,frames)
+ if joint_wrist:
+  from .encoder_wrist import validate_parameters
+  validate_parameters(d['preencoder'])
+  if len(d['finger_control']['joints'])!=2:raise ValueError('Joint study requires both index joints')
+ mutable=('action','rationale','hypothesis')+(('preencoder',) if joint_wrist else ())
  for k in fixed:
-  if k not in ('action','rationale','hypothesis') and d[k]!=fixed[k]:raise ValueError('Fixed field changed: '+k)
+  if k not in mutable and d[k]!=fixed[k]:raise ValueError('Fixed field changed: '+k)
  if d['action'] not in ('run','reject','needs_tool'):raise ValueError('Invalid action')
  return d
 
 def run(config,provider_config):
  install();root=Path(config['output_root']);root.mkdir(parents=True,exist_ok=True);start=now();tick=time.monotonic();history=[];status='budget_exhausted';error=None
+ joint_wrist=config.get('joint_wrist',False);skill=SKILL.parent.parent/'wrist_finger_joint/SKILL.md' if joint_wrist else SKILL
  baseline=Path(config['baseline_case']);verify_source_contract(baseline);br=json.loads((baseline/'result.json').read_text());fixed=copy.deepcopy(json.loads(Path(br['decision_path']).read_text())['decision']);fixed['baseline_case']=str(baseline)
  fixed['contact_control']['contact_bodies']=['right_hand_index_0_link','right_hand_index_1_link']
  geometry=json.loads(Path(config['geometry']).read_text());provider=BudgetProvider(configured_provider(provider_config,root/'.api_rotation.json'),time.monotonic()+1500)
  fixed_context={k:v for k,v in fixed.items() if k not in ('action','rationale','hypothesis')}
  try:
   for i in range(3):
-   ar=root/f'attempt_{i:02d}';ar.mkdir();context={'stage':'finger_plan' if i==0 else 'finger_retry','task':br['task'],'fixed_plan':fixed_context,'native_acceptance':{'downward_force_N_min':20,'hold_ticks':50,'tick_s':.02,'contact_distance_max_m':.001},'baseline':brief(baseline),'geometry':geometry,'prior_attempts':[{'attempt':h['attempt'],'finger_control':h['parameters'],'result':h['evidence']} for h in history],'remaining_trials':3-i}
+   ar=root/f'attempt_{i:02d}';ar.mkdir();context={'stage':'finger_plan' if i==0 else 'finger_retry','task':br['task'],'fixed_plan':fixed_context,'native_acceptance':{'downward_force_N_min':20,'hold_ticks':50,'tick_s':.02,'contact_distance_max_m':.001},'baseline':brief(baseline),'geometry':geometry,'prior_attempts':[{'attempt':h['attempt'],'parameters':h['parameters'],'result':h['evidence']} for h in history],'remaining_trials':3-i}
    # Only the relevant latest image, not repeated historical full-state or acceptance-code blobs.
    image_case=Path(history[-1]['case']) if history else baseline;ins=json.loads((image_case/'inspection/inspection.json').read_text());context['evidence']={'inspection':{'review_images':ins['review_images'][-1:]}}
-   d,dp=api_decide(provider,ar,context,[br['episode']],tools=tools(SCHEMA),validator=lambda d,ep:validate(d,fixed,geometry['hand_command_order'],br['source_frames']+br['tail_policy_ticks']),skill_path=SKILL)
-   save(ar/'plan.json',d);print(json.dumps({'event':'plan','attempt':i,'parameters':d['finger_control'],'rationale':d['rationale'],'action':d['action']},ensure_ascii=False),flush=True)
+   context['joint_wrist_enabled']=joint_wrist
+   if joint_wrist:context['editable_fields']=['preencoder','finger_control'];context['elbow_interface']='mode1 has no explicit elbow target; do not claim elbow optimization'
+   if config.get('prior_evidence'):context['prior_finger_only_trials']=json.loads(Path(config['prior_evidence']).read_text())
+   d,dp=api_decide(provider,ar,context,[br['episode']],tools=tools(SCHEMA),validator=lambda d,ep:validate(d,fixed,geometry['hand_command_order'],br['source_frames']+br['tail_policy_ticks'],joint_wrist=joint_wrist),skill_path=skill)
+   save(ar/'plan.json',d);print(json.dumps({'event':'plan','attempt':i,'parameters':({'preencoder':d['preencoder'],'finger_control':d['finger_control']} if joint_wrist else d['finger_control']),'rationale':d['rationale'],'action':d['action']},ensure_ascii=False),flush=True)
    if d['action']!='run':status=d['action'];break
    r=physical_case(config['dataset'],d['episode'],ar,'token_prefix_mode1',br['object_delta_xy_m'],decision_path=dp,preencoder=True,finger_control=True);save(ar/'physics.result.json',r);case=Path(r['experiment_path'])
    raw=np.load(case/'execution/controller.npz')['records'];trace=np.load(case/'execution/trajectory.npz');assert np.array_equal(np.repeat(raw[:,-29:],4,axis=0)[:len(trace['commands'])],trace['commands'][:,1:30])
-   ins=inspect_case(case,case/'inspection');row={'attempt':i,'parameters':d['finger_control'],'case':str(case),'result':r,'evidence':brief(case),'video':ins['video'],'rendering_wall_s':ins['rendering_and_inspection_wall_s'],'replay':None}
+   ins=inspect_case(case,case/'inspection');row={'attempt':i,'parameters':({'preencoder':d['preencoder'],'finger_control':d['finger_control']} if joint_wrist else d['finger_control']),'case':str(case),'result':r,'evidence':brief(case),'video':ins['video'],'rendering_wall_s':ins['rendering_and_inspection_wall_s'],'replay':None}
    # Persist physical outcome before any replay/reporting can fail.
    history.append(row);save(root/'progress.json',history)
    if r['coverage']==1:
