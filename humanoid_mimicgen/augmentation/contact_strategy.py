@@ -52,6 +52,9 @@ def contact_audit(case):
   for name,f in by.items():peaks[name]=max(peaks.get(name,0),f);counts[name]=counts.get(name,0)+int(f>.1)
   rows.append({'frame':i//4,'force':sum(by.values()),'distance':distance,'by_body':by})
  summary=force_hold_summary(rows,20,.02,.001);summary.update(native_success=result['success'],coverage=result['coverage'],failure=result['failure'],final_force_N=rows[-1]['force'],peak_by_body_N=peaks,contact_ticks=counts,omitted_active_bodies=[n for n,v in peaks.items() if v>.1 and not any(k in n.lower() for k in native_keys)],physics_steps=0,physical_gate=bool(summary['meets_one_second'] and result['coverage']==1 and not result['failure']),native_checker_unchanged=True)
+ from .button_acceptance import evaluate,PROFILE
+ reviewed=evaluate(case,case/'execution/button_acceptance.json')
+ summary.update(all_right_diagnostic_gate=summary['physical_gate'],physical_gate=reviewed['revised_success'],revised_success=reviewed['revised_success'],acceptance_profile=PROFILE,revised_hold_s=reviewed['revised_hold_s'])
  save(case/'contact_strategy_audit.json',summary);return summary
 
 def validate_plan(d,fixed,names,frames,bodies):
@@ -76,14 +79,14 @@ def run(config,provider_config):
  writer=ph.write_new
  def write(path,value):
   if Path(path).name=='experiment.json':
-   value=copy.deepcopy(value);plan=json.loads(Path(value['pipeline']['planner_identity_and_prompt_hash']['decision_path']).read_text())['decision'];value['purpose']['hypothesis']='API selects evidenced contact strategy; native and expanded physical button gate reported separately';value['purpose']['planned_changes'].append({'api_strategy':plan['strategy'],'tail_s':plan['tail_s']});value['purpose']['invariants']=[x for x in value['purpose']['invariants'] if not x.startswith('fixed wrist strategy')];value['pipeline']['allowed_retry_changes']=['API preencoder/finger parameters and tail0..5s within frozen per-case plan'];value['pipeline']['entrypoint']='humanoid_mimicgen.augmentation.contact_strategy.run';value['metrics']['expanded_contact_gate']='Diagnostic only: all right hand/wrist button downward force>=20N, contact distance<=1mm, continuous1s; native checker unchanged';value['pipeline']['experience_reuse']=plan['strategy']['change_kind']
+   value=copy.deepcopy(value);plan=json.loads(Path(value['pipeline']['planner_identity_and_prompt_hash']['decision_path']).read_text())['decision'];value['purpose']['hypothesis']='API selects evidenced contact strategy; native and expanded physical button gate reported separately';value['purpose']['planned_changes'].append({'api_strategy':plan['strategy'],'tail_s':plan['tail_s']});value['purpose']['invariants']=[x for x in value['purpose']['invariants'] if not x.startswith('fixed wrist strategy')];value['pipeline']['allowed_retry_changes']=['API preencoder/finger parameters and tail0..5s within frozen per-case plan'];value['pipeline']['entrypoint']='humanoid_mimicgen.augmentation.contact_strategy.run';value['metrics']['expanded_contact_gate']='Approved button_palm_mesh_v1: native contact geometry plus exact right_hand_palm_link mesh on right_wrist_yaw_link; same20N/1mm/50ticks, full-safe execution. Native separately retained. All-right force remains diagnostic only.';value['pipeline']['experience_reuse']=plan['strategy']['change_kind']
    for p in [Path(config['experience']),Path(config['geometry']),Path(config['config_path'])]:
     value['preflight']['evidence_paths'].append(str(p));value['preflight']['evidence_sha256'][str(p)]=file_hash(p);shutil.copy2(p,Path(path).parent/'source_snapshot'/('strategy_'+p.name))
   return writer(path,value)
  ph.write_new=write
  try:
   for i in range(3):
-   ar=root/f'attempt_{i:02d}';ar.mkdir();context={'task':br['task'],'objective':'reproduce sustained physical button press>=20N1s and exact token+hands replay; preserve native acceptance separately','fixed_plan':{k:v for k,v in fixed.items() if k not in ['action','rationale','hypothesis']},'editable':['preencoder','finger_control','tail_s','strategy'],'geometry':geometry,'experience':experience,'baseline':brief(baseline),'previous':[{'parameters':h['parameters'],'diagnostic':h['audit']} for h in history],'remaining_trials':3-i,'tail_budget_s':5,'api_controls_physics':True}
+   ar=root/f'attempt_{i:02d}';ar.mkdir();context={'task':br['task'],'objective':'Pass approved button_palm_mesh_v1 acceptance and exact token+hands replay; preserve original native result separately','fixed_plan':{k:v for k,v in fixed.items() if k not in ['action','rationale','hypothesis']},'editable':['preencoder','finger_control','tail_s','strategy'],'geometry':geometry,'experience':experience,'baseline':brief(baseline),'previous':[{'parameters':h['parameters'],'diagnostic':h['audit']} for h in history],'remaining_trials':3-i,'tail_budget_s':5,'api_controls_physics':True}
    image_case=Path(history[-1]['case']) if history else baseline;ip=image_case/'inspection/inspection.json'
    if ip.exists():context['evidence']={'inspection':{'review_images':json.loads(ip.read_text())['review_images'][-1:]}}
    d,dp=api_decide(provider,ar,context,[br['episode']],tools=tools(SCHEMA),validator=lambda d,eps:validate_plan(d,fixed,config['hand_command_order'],br['source_frames'],bodies),skill_path=SKILL);save(ar/'plan.json',d)

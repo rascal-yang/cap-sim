@@ -30,3 +30,7 @@ The grounded example and its limitations are documented in references/button-exp
 ## Current-state precedence and decision quality
 
 Rewrite rationale from the most recent actual execution and diagnostics on every decision. Do not copy fixed_plan rationale, earlier success claims, peak forces or obsolete control suggestions as if they describe the current case. Historical success and current success have different provenance. Check that action, rationale and strategy agree: a stopped failing run cannot simultaneously be described as a current successful run. If the provided stage is decision_quality_review, use the review tool schema to identify contradictions and give a corrected interpretation; do not generate or execute physical parameters.
+
+## Approved button acceptance override
+
+The user approved button_palm_mesh_v1: preserve every native contact rule and threshold, adding ONLY the collision mesh right_hand_palm_link attached to right_wrist_yaw_link. Do not include its wrist-shell mesh or other wrist bodies. The runner independently checks contact count>=1, distance<=1mm, downward force>=20N for50 consecutive50Hz ticks and full safe execution. Report native_success and revised_success separately with profile ID. A revised pass is accepted under this declared profile, not an original native benchmark pass. The old all-right/wrist force summary remains diagnostic and cannot substitute for this exact-mesh checker. This approval does not alter online force feedback or authorize task-general threshold changes.
